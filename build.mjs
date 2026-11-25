@@ -52,10 +52,12 @@ const page = `<!doctype html>
   #bar button:hover { background: rgba(255, 255, 255, .14); }
   #bar button[aria-pressed="true"] { background: rgba(255, 255, 255, .9); color: #0b1a22; }
   #bar button:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+  #bar .sep { width: 1px; margin: .5em .25em; background: rgba(255, 255, 255, .28); }
+  #bar [hidden] { display: none; }
 </style>
 </head>
 <body>
-<div id="bar">${STYLES.map((s) => `<button type="button" data-style="${s.id}" aria-pressed="false">${s.label}</button>`).join('')}</div>
+<div id="bar">${STYLES.map((s) => `<button type="button" data-style="${s.id}" aria-pressed="false">${s.label}</button>`).join('')}<span class="sep" id="fs-sep"></span><button type="button" id="fs">全画面</button></div>
 <script>
 (function () {
   'use strict';
@@ -64,7 +66,9 @@ const page = `<!doctype html>
   var KEY = 'aquarium-style';
   var HIDE_MS = 3000;
   var bar = document.getElementById('bar');
-  var buttons = Array.prototype.slice.call(bar.querySelectorAll('button'));
+  var buttons = Array.prototype.slice.call(bar.querySelectorAll('button[data-style]'));
+  var fsButton = document.getElementById('fs');
+  var root = document.documentElement;
   var current = null, frame = null, hideTimer = 0, lastX = -1, lastY = -1;
 
   function initial() {
@@ -105,6 +109,27 @@ const page = `<!doctype html>
   buttons.forEach(function (b) {
     b.addEventListener('click', function () { show(b.dataset.style); wake(); });
   });
+
+  // 全画面。ブラウザの決まりで、ボタンかキーの操作からしか入れない（開いただけでは入れない）。
+  var fsRequest = root.requestFullscreen || root.webkitRequestFullscreen;
+  var fsExit = document.exitFullscreen || document.webkitExitFullscreen;
+  function fsElement() { return document.fullscreenElement || document.webkitFullscreenElement || null; }
+  function toggleFullscreen() {
+    if (!fsRequest || !fsExit) return;
+    try {
+      var p = fsElement() ? fsExit.call(document) : fsRequest.call(root);
+      if (p && p.catch) p.catch(function () {});
+    } catch (e) {}
+  }
+  function syncFullscreen() { fsButton.textContent = fsElement() ? '全画面を終了' : '全画面'; }
+  if (fsRequest && fsExit && document.fullscreenEnabled !== false) {
+    fsButton.addEventListener('click', function () { toggleFullscreen(); wake(); });
+    document.addEventListener('fullscreenchange', syncFullscreen);
+    document.addEventListener('webkitfullscreenchange', syncFullscreen);
+  } else {
+    fsButton.hidden = true;
+    document.getElementById('fs-sep').hidden = true;
+  }
   window.addEventListener('pointermove', function (e) {
     // 画面の描き替えで出る、動いていないポインタの通知は無視する。
     if (e.clientX === lastX && e.clientY === lastY) return;
@@ -118,6 +143,7 @@ const page = `<!doctype html>
     if (e.key === '1' || e.key === '2' || e.key === '3') show(ORDER[+e.key - 1]);
     else if (e.key === 'ArrowRight') show(ORDER[(i + 1) % ORDER.length]);
     else if (e.key === 'ArrowLeft') show(ORDER[(i + ORDER.length - 1) % ORDER.length]);
+    else if ((e.key === 'f' || e.key === 'F') && !e.metaKey && !e.ctrlKey && !e.altKey) toggleFullscreen();
     else return;
     wake();
   });
@@ -128,6 +154,7 @@ const page = `<!doctype html>
     var s = w && w.__stats ? w.__stats() : {};
     s.style = current;
     s.frames = document.querySelectorAll('iframe').length;
+    s.fullscreen = !!fsElement();
     return s;
   };
 
