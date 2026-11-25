@@ -16,7 +16,19 @@
 
 `aquarium.html` は 3 案を 1 ファイルにまとめたもので、画面上のボタンで切り替えられる。
 
+## URL
+
+| 開くもの | URL |
+|---|---|
+| 切り替え付き | https://ty-gh.github.io/aquarium/ |
+| 案を指定して開く | https://ty-gh.github.io/aquarium/?style=paper （`pixel`・`paper`・`glow`） |
+| 1 案だけ | https://ty-gh.github.io/aquarium/paper.html （`pixel.html`・`glow.html` も同じ） |
+
+開くときだけネット接続が要る。`main` に push すると数分で反映され、機器の側は再読み込みで新しくなる。
+
 ## 使い方
+
+URL を開くか、HTML を機器にコピーして開く。
 
 1. 再生する機器に HTML を 1 つコピーする（ほかのファイルは要らない。ネット接続も要らない）
 2. ブラウザで開く
@@ -35,7 +47,7 @@
 
 選んだ案はブラウザが覚え、次に開いたときもその案で始まる。`aquarium.html?style=paper` のように開くと、その案で始まる（`pixel`・`paper`・`glow`）。
 
-`aquarium.html` は `pixel.html`・`paper.html`・`glow.html` から作る。3 つのどれかを直したら `node build.mjs` で作り直す。
+`aquarium.html` と `index.html`（URL の入口。中身は同じ）は `pixel.html`・`paper.html`・`glow.html` から作る。3 つのどれかを直したら `node build.mjs` で作り直す。
 
 全画面の操作は実機で試していない。Mac の Chrome はツールバーが残る設定のことがある（「表示」メニューで外す）。
 

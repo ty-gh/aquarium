@@ -1,4 +1,4 @@
-// pixel.html・paper.html・glow.html を 1 ファイルにまとめて aquarium.html を作る。
+// pixel.html・paper.html・glow.html を 1 ファイルにまとめて aquarium.html と index.html を作る。
 // 使い方: node build.mjs
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -138,5 +138,6 @@ const page = `<!doctype html>
 </html>
 `;
 
-writeFileSync(join(dir, 'aquarium.html'), page);
-console.log(`aquarium.html を書き出した（${(Buffer.byteLength(page) / 1024).toFixed(0)} KB）`);
+// index.html は GitHub Pages の入口。中身は aquarium.html と同じ。
+for (const name of ['aquarium.html', 'index.html']) writeFileSync(join(dir, name), page);
+console.log(`aquarium.html と index.html を書き出した（${(Buffer.byteLength(page) / 1024).toFixed(0)} KB）`);
