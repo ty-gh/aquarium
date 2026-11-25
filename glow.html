@@ -1,0 +1,1372 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>水槽</title>
+<style>
+html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#06131b;cursor:none}
+canvas{display:block;position:fixed;left:0;top:0;width:100vw;height:100vh;cursor:none}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+(function () {
+'use strict';
+
+/* ================= 基本 ================= */
+var TAU = Math.PI * 2;
+var qs = new URLSearchParams(location.search);
+var SPEED = parseFloat(qs.get('speed'));
+if (!isFinite(SPEED) || SPEED <= 0) SPEED = 1;
+if (SPEED > 1000) SPEED = 1000;
+
+var CYCLE = 1200;          // 色味の一巡（秒）
+var STEP = 1 / 30;         // シミュレーションの最大刻み
+var MAX_STEPS = 2000;
+var MAX_DT = 0.1;          // rAF の dt 上限（秒）
+var MAX_LONG = 1920;       // 内部描画の長辺上限
+
+var canvas = document.getElementById('c');
+var ctx = canvas.getContext('2d', { alpha: false });
+var W = 0, H = 0, S = 1;
+
+function rnd(a, b) { return a + Math.random() * (b - a); }
+function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+function lerp(a, b, t) { return a + (b - a) * t; }
+function wrapA(p) { p = p % TAU; return p < 0 ? p + TAU : p; }
+function smooth(t) { return t * t * (3 - 2 * t); }
+function mixc(a, b, t) { return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]; }
+function mulc(a, k) { return [a[0] * k, a[1] * k, a[2] * k]; }
+function cs(c, a) {
+  var r = c[0] < 0 ? 0 : c[0] > 255 ? 255 : c[0] | 0;
+  var g = c[1] < 0 ? 0 : c[1] > 255 ? 255 : c[1] | 0;
+  var b = c[2] < 0 ? 0 : c[2] > 255 ? 255 : c[2] | 0;
+  if (a === undefined) a = 1;
+  a = a < 0 ? 0 : a > 1 ? 1 : a;
+  return 'rgba(' + r + ',' + g + ',' + b + ',' + (Math.round(a * 1000) / 1000) + ')';
+}
+function mk(w, h) { var c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
+
+/* 滑らかな閉曲線（中点を通る二次ベジェ） */
+function smoothClosed(g, xs, ys, n) {
+  g.moveTo((xs[n - 1] + xs[0]) / 2, (ys[n - 1] + ys[0]) / 2);
+  for (var i = 0; i < n; i++) {
+    var j = (i + 1) % n;
+    g.quadraticCurveTo(xs[i], ys[i], (xs[i] + xs[j]) / 2, (ys[i] + ys[j]) / 2);
+  }
+  g.closePath();
+}
+function smoothOpen(g, xs, ys, i0, i1) {
+  g.moveTo(xs[i0], ys[i0]);
+  for (var i = i0 + 1; i < i1; i++) g.quadraticCurveTo(xs[i], ys[i], (xs[i] + xs[i + 1]) / 2, (ys[i] + ys[i + 1]) / 2);
+  g.lineTo(xs[i1], ys[i1]);
+}
+var PX = new Float32Array(96), PY = new Float32Array(96);
+
+/* ================= 色味（約 20 分で一巡） ================= */
+var KEYS = [
+  // 昼（〜0.16）→ 夕方（0.30〜0.47）→ 夜（0.60〜0.74）→ 明け方 → 昼
+  { at: 0.00, top: [56, 118, 134],  mid: [20, 62, 80], bot: [5, 18, 28],  light: [200, 230, 222], haze: [34, 82, 98],  amb: 1.00, glow: 1.0, lk: 1.0 },
+  { at: 0.16, top: [58, 116, 130],  mid: [22, 62, 78], bot: [6, 18, 28],  light: [206, 228, 214], haze: [36, 80, 94],  amb: 1.00, glow: 1.0, lk: 1.0 },
+  { at: 0.30, top: [160, 114, 84],  mid: [68, 56, 70], bot: [18, 15, 26], light: [252, 194, 130], haze: [90, 70, 76],  amb: 0.94, glow: 1.8, lk: 1.45 },
+  { at: 0.47, top: [148, 96, 90],   mid: [60, 46, 70], bot: [16, 12, 28], light: [250, 174, 134], haze: [82, 60, 76],  amb: 0.86, glow: 2.0, lk: 1.38 },
+  { at: 0.60, top: [32, 52, 92],    mid: [15, 30, 60], bot: [5, 10, 22],  light: [146, 172, 222], haze: [26, 42, 72],  amb: 0.62, glow: 2.3, lk: 1.0 },
+  { at: 0.74, top: [30, 50, 90],    mid: [14, 29, 58], bot: [5, 10, 22],  light: [140, 168, 220], haze: [25, 41, 70],  amb: 0.60, glow: 2.3, lk: 1.0 },
+  { at: 0.88, top: [44, 92, 118],   mid: [17, 50, 74], bot: [5, 15, 28],  light: [182, 208, 228], haze: [32, 72, 96],  amb: 0.84, glow: 1.4, lk: 1.0 }
+];
+var P = { top: [0, 0, 0], mid: [0, 0, 0], bot: [0, 0, 0], light: [0, 0, 0], haze: [0, 0, 0], amb: 1, glow: 1, lk: 1 };
+var PKEYS = ['top', 'mid', 'bot', 'light', 'haze'];
+function computePalette(f) {
+  var i = 0;
+  for (var k = 0; k < KEYS.length; k++) if (f >= KEYS[k].at) i = k;
+  var a = KEYS[i], b = KEYS[(i + 1) % KEYS.length];
+  var bAt = (i + 1 < KEYS.length) ? b.at : 1 + KEYS[0].at;
+  var t = smooth(clamp((f - a.at) / (bAt - a.at), 0, 1));
+  for (var j = 0; j < PKEYS.length; j++) P[PKEYS[j]] = mixc(a[PKEYS[j]], b[PKEYS[j]], t);
+  P.amb = lerp(a.amb, b.amb, t);
+  P.glow = lerp(a.glow, b.glow, t);
+  P.lk = lerp(a.lk, b.lk, t);
+}
+/* 物の色: 明るさ（環境光）を掛け、奥行きぶん水の色へ寄せる */
+function tone(base, hz, k) {
+  var kk = (k === undefined ? 1 : k) * P.amb;
+  return mixc([base[0] * kk, base[1] * kk, base[2] * kk], P.haze, hz);
+}
+
+/* ================= スプライト（光のにじみ） ================= */
+var spr = { teal: mk(128, 128), warm: mk(128, 128), light: mk(128, 128), shaft: mk(64, 512), bubble: mk(48, 48) };
+function glowSprite(c, col) {
+  var g = c.getContext('2d'), s = c.width;
+  g.clearRect(0, 0, s, s);
+  var gr = g.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+  gr.addColorStop(0, cs(col, 1));
+  gr.addColorStop(0.2, cs(col, 0.55));
+  gr.addColorStop(0.5, cs(col, 0.17));
+  gr.addColorStop(1, cs(col, 0));
+  g.fillStyle = gr; g.fillRect(0, 0, s, s);
+}
+glowSprite(spr.teal, [118, 212, 204]);
+glowSprite(spr.warm, [250, 180, 140]);
+function rebuildSprites() {
+  glowSprite(spr.light, P.light);
+  var g = spr.shaft.getContext('2d');
+  g.globalCompositeOperation = 'source-over';
+  g.clearRect(0, 0, 64, 512);
+  var gr = g.createLinearGradient(0, 0, 64, 0);
+  gr.addColorStop(0, cs(P.light, 0)); gr.addColorStop(0.25, cs(P.light, 0.35));
+  gr.addColorStop(0.5, cs(P.light, 1)); gr.addColorStop(0.75, cs(P.light, 0.35)); gr.addColorStop(1, cs(P.light, 0));
+  g.fillStyle = gr; g.fillRect(0, 0, 64, 512);
+  g.globalCompositeOperation = 'destination-in';
+  gr = g.createLinearGradient(0, 0, 0, 512);
+  gr.addColorStop(0, 'rgba(0,0,0,1)'); gr.addColorStop(0.4, 'rgba(0,0,0,0.5)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = gr; g.fillRect(0, 0, 64, 512);
+  g.globalCompositeOperation = 'source-over';
+
+  g = spr.bubble.getContext('2d');
+  g.clearRect(0, 0, 48, 48);
+  gr = g.createRadialGradient(24, 24, 0, 24, 24, 24);
+  gr.addColorStop(0, cs(P.light, 0.05)); gr.addColorStop(0.6, cs(P.light, 0.1));
+  gr.addColorStop(0.85, cs(P.light, 0.55)); gr.addColorStop(1, cs(P.light, 0));
+  g.fillStyle = gr; g.fillRect(0, 0, 48, 48);
+  gr = g.createRadialGradient(17, 16, 0, 17, 16, 7);
+  gr.addColorStop(0, 'rgba(255,255,255,0.7)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = gr; g.fillRect(0, 0, 48, 48);
+}
+
+/* ================= 情景（形は一度だけ作り、リサイズ時は並べ直すだけ） ================= */
+var sandA = rnd(0, TAU), sandB = rnd(0, TAU);
+function sandAt(x) {
+  var u = x / W;
+  return H * (0.852 + 0.010 * Math.sin(u * TAU * 0.7 + sandA) + 0.005 * Math.sin(u * TAU * 2.3 + sandB)
+    - 0.024 * Math.exp(-Math.pow((u - 0.73) / 0.13, 2)) - 0.012 * Math.exp(-Math.pow((u - 0.22) / 0.1, 2)));
+}
+
+var PLANT_COL = { vallis: [74, 116, 86], sword: [82, 122, 74], stem: [100, 122, 72] };
+var LAYER_HZ = { far: 0.6, mid: 0.2, near: 0.0 };
+var LAYER_K = { far: 1.0, mid: 0.95, near: 0.62 };
+var scene = { far: [], mid: [], near: [] };
+var bladeCount = 0;
+
+function makeGroup(layer, kind, xF, count, hF, o) {
+  var g = { layer: layer, kind: kind, xF: xF, blades: [] };
+  for (var i = 0; i < count; i++) {
+    var b = {
+      xOff: rnd(-1, 1) * (o.spread || 30), dy: rnd(0, 6), hF: hF * rnd(o.hmin || 0.6, 1),
+      lean: rnd(-0.22, 0.22) + (o.bias || 0), wS: rnd(o.w0 || 10, o.w1 || 16),
+      amp: rnd(0.05, 0.09) * (o.ampK || 1), bp: rnd(0, TAU), bw: rnd(0.25, 0.6),
+      leafLen: rnd(22, 30), leafGap: rnd(13, 17), leafPh: rnd(0, 1),
+      x: 0, y: 0, h: 0, w: 0, bottom: !!o.bottom
+    };
+    if (kind === 'sword') {
+      var t = count > 1 ? i / (count - 1) : 0.5;
+      b.lean = lerp(-0.85, 0.85, t) + rnd(-0.08, 0.08);
+      b.hF = hF * (1 - 0.42 * Math.abs(b.lean)) * rnd(0.9, 1);
+      b.xOff = rnd(-6, 6);
+    }
+    if (kind === 'stem') b.lean = rnd(-0.1, 0.1) + (o.bias || 0);
+    g.blades.push(b);
+    bladeCount++;
+  }
+  scene[layer].push(g);
+}
+// 奥
+makeGroup('far', 'vallis', 0.05, 9, 0.50, { spread: 40, w0: 9, w1: 13 });
+makeGroup('far', 'vallis', 0.31, 8, 0.42, { spread: 36, w0: 9, w1: 13 });
+makeGroup('far', 'stem', 0.44, 4, 0.36, { spread: 30 });
+makeGroup('far', 'vallis', 0.56, 7, 0.34, { spread: 32, w0: 8, w1: 12 });
+makeGroup('far', 'vallis', 0.70, 9, 0.48, { spread: 40, w0: 9, w1: 13 });
+makeGroup('far', 'vallis', 0.94, 9, 0.52, { spread: 40, w0: 9, w1: 13 });
+// 中
+makeGroup('mid', 'sword', 0.13, 8, 0.30, {});
+makeGroup('mid', 'stem', 0.89, 5, 0.40, { spread: 34, bias: -0.04 });
+makeGroup('mid', 'vallis', 0.62, 6, 0.24, { spread: 24, w0: 10, w1: 14 });
+// 手前（逆光の濃いシルエット）
+makeGroup('near', 'vallis', 0.0, 8, 0.62, { spread: 50, w0: 16, w1: 24, bias: 0.12, bottom: true, ampK: 0.8, hmin: 0.55 });
+makeGroup('near', 'vallis', 1.0, 8, 0.56, { spread: 50, w0: 16, w1: 24, bias: -0.12, bottom: true, ampK: 0.8, hmin: 0.55 });
+
+function makeRock(xF, rxS, ryS, hz, col, seedRot) {
+  var k = [];
+  for (var i = 0; i < 11; i++) k.push(rnd(0.82, 1.1));
+  var sp = [];
+  for (var j = 0; j < 4; j++) sp.push([rnd(-0.6, 0.6), rnd(-0.9, 0.1), rnd(0.25, 0.5), Math.random() < 0.6 ? 0 : 1]);
+  return { xF: xF, rxS: rxS, ryS: ryS, hz: hz, col: col, k: k, rot: seedRot, moss: Math.random() < 0.6, sp: sp, tint: [rnd(-5, 6), rnd(-4, 5), rnd(-6, 3)] };
+}
+var rocksFar = [
+  makeRock(0.08, 150, 90, 0.62, [92, 100, 102], rnd(0, 1)),
+  makeRock(0.40, 120, 70, 0.66, [92, 100, 102], rnd(0, 1)),
+  makeRock(0.55, 170, 95, 0.66, [92, 100, 102], rnd(0, 1)),
+  makeRock(0.92, 140, 100, 0.62, [92, 100, 102], rnd(0, 1))
+];
+var rocks = [
+  makeRock(0.795, 100, 82, 0.12, [104, 106, 100], rnd(0, 1)),
+  makeRock(0.715, 168, 140, 0.05, [110, 108, 100], rnd(0, 1)),
+  makeRock(0.635, 62, 44, 0.05, [100, 102, 98], rnd(0, 1)),
+  makeRock(0.205, 80, 56, 0.08, [104, 104, 98], rnd(0, 1)),
+  makeRock(0.265, 50, 36, 0.05, [100, 100, 96], rnd(0, 1))
+];
+// 流木: 砂からの相対高さで指定 [x0,up0, cx,upc, x1,up1, w0,w1]
+// 流木: 砂の上の基準点からの相対位置（S 単位）。枝を先に、幹を最後に描いて付け根を隠す
+var WOOD_XF = 0.25;
+var woods = [
+  [85, -184, 150, -262, 215, -300, 26, 9],
+  [-7, -268, -40, -350, -95, -405, 20, 7],
+  [150, 10, 230, -4, 310, 8, 34, 13],
+  [160, 8, 120, -250, -110, -310, 58, 20]
+];
+var grains = [];
+for (var gi = 0; gi < 1100; gi++) grains.push([Math.random(), Math.random(), rnd(0.6, 1.7), Math.random() < 0.5 ? 1 : 0, rnd(0.05, 0.16)]);
+var pebbles = [];
+for (var pi = 0; pi < 18; pi++) pebbles.push([Math.random(), rnd(0.3, 0.95), rnd(7, 16), rnd(0.42, 0.66), rnd(0.75, 1.05), rnd(-0.3, 0.3)]);
+
+function layoutScene() {
+  for (var L in scene) {
+    var groups = scene[L];
+    for (var i = 0; i < groups.length; i++) {
+      var g = groups[i];
+      for (var j = 0; j < g.blades.length; j++) {
+        var b = g.blades[j];
+        b.x = g.xF * W + b.xOff * S;
+        b.y = b.bottom ? H + 20 * S + b.dy * S : sandAt(b.x) + (6 + b.dy) * S;
+        b.h = b.hF * H;
+        if (g.kind === 'sword' || b.bottom) b.h = Math.min(b.h, b.hF * Math.max(W, H) * 0.75);
+        b.w = b.wS * S;
+      }
+    }
+  }
+}
+
+/* ================= 背景・岩・砂（静止画として焼いておく） ================= */
+var bgL = mk(1, 1), midL = mk(1, 1), ovL = mk(1, 1);
+var gradCache = {};      // 水草のグラデーション
+var palVer = 0;
+
+function rockGeom(r, x, base) {
+  var n = r.k.length, rx = r.rxS * S, ry = r.ryS * S, cy = base - ry * 0.55;
+  for (var i = 0; i < n; i++) {
+    var a = (i / n + r.rot) * TAU;
+    PX[i] = x + Math.cos(a) * rx * r.k[i];
+    var py = cy + Math.sin(a) * ry * r.k[i];
+    PY[i] = py > base ? base : py;
+  }
+  return n;
+}
+function drawRock(g, r) {
+  var x = r.xF * W, rx = r.rxS * S, ry = r.ryS * S;
+  var base = sandAt(x) + ry * (r.hz > 0.3 ? -0.05 : 0.18);
+  var cy = base - ry * 0.55;
+  // 接地の影
+  if (r.hz < 0.3) {
+    g.save(); g.translate(x, base - ry * 0.05); g.scale(rx * 1.35, ry * 0.28);
+    var sg = g.createRadialGradient(0, 0, 0, 0, 0, 1);
+    sg.addColorStop(0, 'rgba(0,0,0,0.42)'); sg.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = sg; g.beginPath(); g.arc(0, 0, 1, 0, TAU); g.fill(); g.restore();
+  }
+  var n = rockGeom(r, x, base);
+  g.beginPath(); smoothClosed(g, PX, PY, n);
+  var lx = x - rx * 0.25, ly = cy - ry * 0.8;
+  var gr = g.createRadialGradient(lx, ly, 0, lx, ly, Math.max(rx, ry) * 1.7);
+  var c = [r.col[0] + r.tint[0], r.col[1] + r.tint[1], r.col[2] + r.tint[2]];
+  gr.addColorStop(0, cs(mixc(tone(c, r.hz, 1.15), P.light, 0.22 * (1 - r.hz))));
+  gr.addColorStop(0.35, cs(tone(c, r.hz, 0.8)));
+  gr.addColorStop(0.75, cs(tone(c, r.hz, 0.42)));
+  gr.addColorStop(1, cs(tone(c, r.hz, 0.25)));
+  g.fillStyle = gr; g.fill();
+  for (var si = 0; si < r.sp.length; si++) {
+    var q = r.sp[si], qx = x + q[0] * rx, qy = cy + q[1] * ry, qr = q[2] * rx;
+    var qg = g.createRadialGradient(qx, qy, 0, qx, qy, qr);
+    var qc = q[3] ? 'rgba(255,240,220,' : 'rgba(10,12,14,';
+    qg.addColorStop(0, qc + (q[3] ? 0.06 : 0.16) * (1 - r.hz) + ')'); qg.addColorStop(1, qc + '0)');
+    g.fillStyle = qg; g.fill();
+  }
+  if (r.moss) {
+    var mg = g.createRadialGradient(x + rx * 0.1, cy - ry * 0.9, 0, x + rx * 0.1, cy - ry * 0.9, rx * 0.7);
+    mg.addColorStop(0, cs(tone([96, 128, 80], r.hz, 0.9), 0.24)); mg.addColorStop(1, cs(tone([96, 128, 80], r.hz, 0.9), 0));
+    g.fillStyle = mg; g.fill();
+  }
+  var dg = g.createLinearGradient(0, cy, 0, base);
+  dg.addColorStop(0, 'rgba(0,0,0,0)'); dg.addColorStop(1, 'rgba(0,0,0,' + (0.45 * (1 - r.hz)).toFixed(3) + ')');
+  g.fillStyle = dg; g.fill();
+  if (r.hz < 0.3) {
+    // 上面の淡いハイライト
+    g.save(); g.globalCompositeOperation = 'lighter';
+    var hg = g.createRadialGradient(x - rx * 0.1, cy - ry * 0.95, 0, x - rx * 0.1, cy - ry * 0.95, rx * 0.7);
+    hg.addColorStop(0, cs(P.light, 0.16)); hg.addColorStop(1, cs(P.light, 0));
+    g.fillStyle = hg; g.fill();
+    var tg = g.createLinearGradient(0, cy - ry * 1.1, 0, cy - ry * 0.15);
+    tg.addColorStop(0, cs(P.light, 0.26 * Math.min(1.3, P.lk))); tg.addColorStop(1, cs(P.light, 0));
+    g.fillStyle = tg; g.fill(); g.restore();
+  }
+}
+function woodGeom(x0, y0, cx, cy, x1, y1, w0, w1, seed) {
+  var n = 12, m = 0, i, t;
+  var LX = [], LY = [], RX = [], RY = [];
+  for (i = 0; i <= n; i++) {
+    t = i / n;
+    var u = 1 - t;
+    var bx = u * u * x0 + 2 * u * t * cx + t * t * x1;
+    var by = u * u * y0 + 2 * u * t * cy + t * t * y1;
+    var dx = 2 * u * (cx - x0) + 2 * t * (x1 - cx), dy = 2 * u * (cy - y0) + 2 * t * (y1 - cy);
+    var l = Math.hypot(dx, dy) || 1, nx = -dy / l, ny = dx / l;
+    var w = lerp(w0, w1, t) * (1 + 0.12 * Math.sin(t * 9 + seed) + 0.07 * Math.sin(t * 23 + seed * 1.7));
+    LX.push(bx + nx * w / 2); LY.push(by + ny * w / 2); RX.push(bx - nx * w / 2); RY.push(by - ny * w / 2);
+  }
+  for (i = 0; i <= n; i++) { PX[m] = LX[i]; PY[m] = LY[i]; m++; }
+  for (i = n; i >= 0; i--) { PX[m] = RX[i]; PY[m] = RY[i]; m++; }
+  return { n: m, LX: LX, LY: LY, RX: RX, RY: RY };
+}
+function drawWood(g, wd, idx) {
+  var ax = WOOD_XF * W, ay = sandAt(ax) + 4 * S;
+  var x0 = ax + wd[0] * S, y0 = ay + wd[1] * S, cx = ax + wd[2] * S, cy = ay + wd[3] * S, x1 = ax + wd[4] * S, y1 = ay + wd[5] * S;
+  var geo = woodGeom(x0, y0, cx, cy, x1, y1, wd[6] * S, wd[7] * S, idx * 2.3);
+  g.beginPath(); smoothClosed(g, PX, PY, geo.n);
+  var top = Math.min(y0, y1, cy) - wd[6] * S, bot = Math.max(y0, y1, cy) + wd[6] * S;
+  var gr = g.createLinearGradient(0, top, 0, bot);
+  var c = [102, 78, 58];
+  gr.addColorStop(0, cs(mixc(tone(c, 0.1, 1.1), P.light, 0.15)));
+  gr.addColorStop(0.5, cs(tone(c, 0.1, 0.7)));
+  gr.addColorStop(1, cs(tone(c, 0.1, 0.32)));
+  g.fillStyle = gr; g.fill();
+  // 横方向の陰影（丸み）
+  var nx = -(y1 - y0), ny = x1 - x0, l = Math.hypot(nx, ny) || 1;
+  nx /= l; ny /= l;
+  var mx = (x0 + x1) / 2, my = (y0 + y1) / 2, w = wd[6] * S;
+  var sg = g.createLinearGradient(mx + nx * w, my + ny * w, mx - nx * w, my - ny * w);
+  sg.addColorStop(0, 'rgba(0,0,0,0.35)'); sg.addColorStop(0.5, 'rgba(0,0,0,0)'); sg.addColorStop(1, 'rgba(0,0,0,0.25)');
+  g.fillStyle = sg; g.fill();
+  // 上側の縁に淡い光
+  var useL = (geo.LY[6] < geo.RY[6]);
+  var ex = useL ? geo.LX : geo.RX, ey = useL ? geo.LY : geo.RY;
+  g.save(); g.globalCompositeOperation = 'lighter';
+  g.lineCap = 'round';
+  g.beginPath(); smoothOpen(g, ex, ey, 1, ex.length - 2);
+  g.strokeStyle = cs(P.light, 0.07); g.lineWidth = 8 * S; g.stroke();
+  g.strokeStyle = cs(P.light, 0.2); g.lineWidth = 2.4 * S; g.stroke(); g.restore();
+  // 木目
+  g.strokeStyle = 'rgba(0,0,0,0.16)'; g.lineWidth = 1.3 * S;
+  for (var s = -1; s <= 1; s += 2) {
+    g.beginPath();
+    for (var i = 1; i < 12; i++) {
+      var px = lerp(geo.LX[i], geo.RX[i], 0.5 + s * 0.18), py = lerp(geo.LY[i], geo.RY[i], 0.5 + s * 0.18);
+      if (i === 1) g.moveTo(px, py); else g.lineTo(px, py);
+    }
+    g.stroke();
+  }
+}
+
+function renderBG() {
+  var g = bgL.getContext('2d');
+  g.globalCompositeOperation = 'source-over';
+  var gr = g.createLinearGradient(0, 0, 0, H);
+  gr.addColorStop(0, cs(P.top)); gr.addColorStop(0.5, cs(P.mid)); gr.addColorStop(1, cs(P.bot));
+  g.fillStyle = gr; g.fillRect(0, 0, W, H);
+  // 上から広がる光
+  g.globalCompositeOperation = 'lighter';
+  var R = Math.max(W, H);
+  var lg = g.createRadialGradient(W * 0.42, -H * 0.18, 0, W * 0.42, -H * 0.18, R * 0.85);
+  lg.addColorStop(0, cs(P.light, 0.30 * P.amb * P.lk)); lg.addColorStop(0.35, cs(P.light, 0.13 * P.amb * P.lk)); lg.addColorStop(1, cs(P.light, 0));
+  g.fillStyle = lg; g.fillRect(0, 0, W, H);
+  var sb = g.createLinearGradient(0, 0, 0, H * 0.08);
+  sb.addColorStop(0, cs(P.light, 0.10 * P.amb)); sb.addColorStop(1, cs(P.light, 0));
+  g.fillStyle = sb; g.fillRect(0, 0, W, H * 0.08);
+  g.globalCompositeOperation = 'source-over';
+  // 奥の霞
+  var hz = g.createLinearGradient(0, H * 0.45, 0, H * 0.9);
+  hz.addColorStop(0, cs(P.haze, 0)); hz.addColorStop(1, cs(P.haze, 0.45));
+  g.fillStyle = hz; g.fillRect(0, H * 0.45, W, H * 0.55);
+  for (var i = 0; i < rocksFar.length; i++) drawRock(g, rocksFar[i]);
+}
+
+function renderMid() {
+  var g = midL.getContext('2d');
+  g.globalCompositeOperation = 'source-over';
+  g.clearRect(0, 0, W, H);
+  // 砂
+  var minY = H;
+  g.beginPath(); g.moveTo(-2, H + 2);
+  for (var x = -2; x <= W + 22; x += 20) { var y = sandAt(x); if (y < minY) minY = y; g.lineTo(x, y); }
+  g.lineTo(W + 22, H + 2); g.closePath();
+  var sc = [166, 148, 118];
+  var gr = g.createLinearGradient(0, minY, 0, H);
+  gr.addColorStop(0, cs(mixc(tone(sc, 0.4, 1.05), P.light, 0.22)));
+  gr.addColorStop(0.22, cs(mixc(tone(sc, 0.2, 0.86), P.light, 0.08)));
+  gr.addColorStop(0.6, cs(tone(sc, 0.08, 0.6)));
+  gr.addColorStop(1, cs(tone(sc, 0.02, 0.4)));
+  g.fillStyle = gr; g.fill();
+  // 上からの光が砂に落ちてできる明るいところ
+  g.save(); g.globalCompositeOperation = 'lighter';
+  g.translate(W * 0.42, minY + (H - minY) * 0.28); g.scale(1, 0.22);
+  var pg0 = g.createRadialGradient(0, 0, 0, 0, 0, Math.max(W, H) * 0.42);
+  pg0.addColorStop(0, cs(P.light, 0.16 * P.amb * P.lk)); pg0.addColorStop(1, cs(P.light, 0));
+  g.fillStyle = pg0; g.fillRect(-W, -H * 3, W * 2, H * 6);
+  g.restore();
+  // 砂粒
+  var dark = cs([0, 0, 0], 1), lite = cs(mixc(P.light, [255, 255, 255], 0.3), 1);
+  for (var i = 0; i < grains.length; i++) {
+    var gq = grains[i], gx = gq[0] * W, top = sandAt(gx) + 3 * S, gy = top + gq[1] * (H - top);
+    g.globalAlpha = gq[4] * (gq[3] ? 0.6 : 1);
+    g.fillStyle = gq[3] ? lite : dark;
+    g.fillRect(gx, gy, gq[2] * S, gq[2] * S * 0.8);
+  }
+  g.globalAlpha = 1;
+  // 流木と岩
+  for (i = 0; i < woods.length; i++) drawWood(g, woods[i], i);
+  for (i = 0; i < rocks.length; i++) drawRock(g, rocks[i]);
+  // 手前の小石
+  for (i = 0; i < pebbles.length; i++) {
+    var p = pebbles[i], px = p[0] * W, t0 = sandAt(px), py = t0 + p[1] * (H - t0), r = p[2] * S;
+    var pg = g.createRadialGradient(px - r * 0.35, py - r * 0.45, 0, px, py, r * 1.2);
+    var pc = mulc([132, 118, 98], p[4]);
+    pg.addColorStop(0, cs(mixc(tone(pc, 0.1, 1.15), P.light, 0.18))); pg.addColorStop(0.7, cs(tone(pc, 0.1, 0.78))); pg.addColorStop(1, cs(tone(pc, 0.1, 0.5), 0));
+    g.fillStyle = pg; g.beginPath(); g.ellipse(px, py, r, r * p[3], p[5], 0, TAU); g.fill();
+  }
+}
+
+function renderOverlay() {
+  var g = ovL.getContext('2d');
+  g.clearRect(0, 0, W, H);
+  var R = Math.hypot(W, H) * 0.62;
+  var vg = g.createRadialGradient(W * 0.5, H * 0.42, R * 0.35, W * 0.5, H * 0.42, R);
+  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,4,8,0.62)');
+  g.fillStyle = vg; g.fillRect(0, 0, W, H);
+  var bg = g.createLinearGradient(0, H * 0.7, 0, H);
+  bg.addColorStop(0, 'rgba(0,4,8,0)'); bg.addColorStop(1, 'rgba(0,4,8,0.26)');
+  g.fillStyle = bg; g.fillRect(0, H * 0.7, W, H * 0.3);
+  // ごく弱い粒状感（静止）
+  var nz = mk(192, 192), nc = nz.getContext('2d'), id = nc.createImageData(192, 192), d = id.data;
+  for (var i = 0; i < d.length; i += 4) { var v = Math.random() < 0.5 ? 0 : 255; d[i] = d[i + 1] = d[i + 2] = v; d[i + 3] = Math.random() * 11; }
+  nc.putImageData(id, 0, 0);
+  g.fillStyle = g.createPattern(nz, 'repeat'); g.fillRect(0, 0, W, H);
+}
+
+function rebuildPlantGrads() {
+  gradCache = {};
+  for (var L in LAYER_HZ) {
+    for (var kind in PLANT_COL) {
+      var c = PLANT_COL[kind], hz = LAYER_HZ[L], k = LAYER_K[L];
+      var gr = ctx.createLinearGradient(0, H, 0, H * 0.2);
+      gr.addColorStop(0, cs(tone(c, hz * 0.8, 0.28 * k)));
+      gr.addColorStop(0.45, cs(tone(c, hz, 0.85 * k)));
+      var topc = kind === 'stem' ? mixc(tone(c, hz, 1.05 * k), tone([176, 104, 82], hz, k), 0.55) : tone(c, hz, 1.05 * k);
+      gr.addColorStop(1, cs(mixc(topc, P.light, 0.3)));
+      gradCache[L + kind] = gr;
+    }
+    var ra = L === 'near' ? 0.3 : L === 'mid' ? 0.24 : 0.12;
+    var rg = ctx.createLinearGradient(0, H, 0, H * 0.2);
+    rg.addColorStop(0, cs(P.light, 0)); rg.addColorStop(0.45, cs(P.light, ra * 0.55)); rg.addColorStop(1, cs(P.light, ra));
+    gradCache[L + 'rim'] = rg;
+  }
+}
+
+var lastBuildReal = -1e9, simSinceBuild = 1e9;
+function rebuildAll() {
+  computePalette(cyc / CYCLE);
+  palVer++;
+  rebuildSprites();
+  renderBG();
+  renderMid();
+  rebuildPlantGrads();
+  simSinceBuild = 0;
+}
+
+/* ================= 水草の描画 ================= */
+var CXa = new Float32Array(10), CYa = new Float32Array(10);
+var BLX = new Float32Array(10), BLY = new Float32Array(10);
+var g1 = rnd(0, TAU), g2 = rnd(0, TAU), g3 = rnd(0, TAU);
+
+function bladeCenter(b, n) {
+  var cur = 0.6 * Math.sin(g1 - b.x / W * 1.6) + 0.3 * Math.sin(g2 - b.x / W * 1.1) + 0.1 * Math.sin(g3);
+  var sway = b.amp * (0.65 * cur + 0.35 * Math.sin(b.bp));
+  var bend = Math.min(1, Math.abs(b.lean + sway));
+  for (var k = 0; k < n; k++) {
+    var t = k / (n - 1);
+    CXa[k] = b.x + b.h * (b.lean * t * t * 0.9 + sway * Math.pow(t, 1.7));
+    CYa[k] = b.y - b.h * t * (1 - 0.2 * t * bend);
+  }
+}
+function drawBlade(b, kind, rim) {
+  var n = 7, k, m = 0;
+  bladeCenter(b, n);
+  for (k = 0; k < n; k++) {
+    var t = k / (n - 1);
+    var a = k > 0 ? k - 1 : 0, c = k < n - 1 ? k + 1 : n - 1;
+    var dx = CXa[c] - CXa[a], dy = CYa[c] - CYa[a], l = Math.hypot(dx, dy) || 1;
+    var nx = -dy / l, ny = dx / l, w;
+    if (kind === 'sword') w = b.w * 2.9 * Math.pow(Math.sin(Math.PI * (0.12 + 0.88 * t)), 0.8);
+    else w = b.w * (1 - 0.72 * t);
+    BLX[k] = CXa[k] + nx * w / 2; BLY[k] = CYa[k] + ny * w / 2;
+    PX[m] = BLX[k]; PY[m] = BLY[k]; m++;
+    PX[2 * n - 1 - k] = CXa[k] - nx * w / 2; PY[2 * n - 1 - k] = CYa[k] - ny * w / 2;
+  }
+  ctx.beginPath(); smoothClosed(ctx, PX, PY, 2 * n); ctx.fill();
+  if (rim) {
+    ctx.beginPath(); smoothOpen(ctx, BLX, BLY, 2, n - 1); ctx.stroke();
+    if (kind === 'sword') { ctx.beginPath(); smoothOpen(ctx, CXa, CYa, 0, n - 2); ctx.stroke(); }
+  }
+}
+function drawStem(b) {
+  var n = 8, k;
+  bladeCenter(b, n);
+  ctx.lineWidth = 2.6 * S;
+  ctx.beginPath(); smoothOpen(ctx, CXa, CYa, 0, n - 1); ctx.stroke();
+  var total = b.h, gap = b.leafGap * S, cnt = Math.floor(total / gap);
+  ctx.beginPath();
+  for (var j = 1; j <= cnt; j++) {
+    var t = (j - b.leafPh * 0.5) / (cnt + 0.5);
+    if (t <= 0.04) continue;
+    var p = t * (n - 1), i = Math.min(n - 2, p | 0), f = p - i;
+    var bx = lerp(CXa[i], CXa[i + 1], f), by = lerp(CYa[i], CYa[i + 1], f);
+    var ta = Math.atan2(CYa[i + 1] - CYa[i], CXa[i + 1] - CXa[i]);
+    var L = b.leafLen * S * (1 - 0.45 * t);
+    for (var s = -1; s <= 1; s += 2) {
+      var a = ta + s * (0.95 + 0.25 * (j % 2));
+      var tx = bx + Math.cos(a) * L, ty = by + Math.sin(a) * L;
+      var px = -Math.sin(a) * L * 0.36, py = Math.cos(a) * L * 0.36;
+      var mx = (bx + tx) / 2, my = (by + ty) / 2;
+      ctx.moveTo(bx, by);
+      ctx.quadraticCurveTo(mx + px, my + py, tx, ty);
+      ctx.quadraticCurveTo(mx - px, my - py, bx, by);
+    }
+  }
+  ctx.fill();
+}
+function drawPlants(layer) {
+  var groups = scene[layer];
+  ctx.lineCap = 'round';
+  for (var i = 0; i < groups.length; i++) {
+    var g = groups[i];
+    var grad = gradCache[layer + g.kind];
+    ctx.fillStyle = grad;
+    if (g.kind === 'stem') {
+      ctx.strokeStyle = grad;
+      for (var j = 0; j < g.blades.length; j++) drawStem(g.blades[j]);
+    } else {
+      ctx.strokeStyle = gradCache[layer + 'rim'];
+      for (var j2 = 0; j2 < g.blades.length; j2++) {
+        ctx.lineWidth = (layer === 'near' ? 1.8 : 1.2) * S;
+        ctx.globalCompositeOperation = 'source-over';
+        drawBlade(g.blades[j2], g.kind, false);
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.beginPath(); smoothOpen(ctx, BLX, BLY, 2, 6); ctx.stroke();
+        if (g.kind === 'sword') { ctx.beginPath(); smoothOpen(ctx, CXa, CYa, 0, 5); ctx.stroke(); }
+        ctx.globalCompositeOperation = 'source-over';
+      }
+    }
+  }
+}
+
+/* ================= 魚 ================= */
+var SP = {
+  tetra: { len: 94, xh: 0.5, xt: -0.40, bend: 0.03, beat: 7.5,
+    top: [0, 0.075, 0.115, 0.13, 0.125, 0.105, 0.08, 0.06, 0.05], bot: [0, 0.065, 0.10, 0.115, 0.11, 0.09, 0.065, 0.05, 0.05],
+    col: [156, 170, 176], back: [70, 90, 100], belly: [182, 184, 184], fin: [176, 192, 196], eye: [0.37, -0.03, 0.05] },
+  angel: { len: 150, xh: 0.5, xt: -0.42, bend: 0.018, beat: 3.0,
+    top: [0, 0.12, 0.25, 0.34, 0.37, 0.34, 0.25, 0.14, 0.07], bot: [0, 0.11, 0.24, 0.33, 0.35, 0.31, 0.22, 0.12, 0.07],
+    col: [216, 214, 204], back: [150, 152, 148], belly: [206, 204, 196], fin: [214, 214, 206], eye: [0.37, -0.07, 0.04] },
+  cory: { len: 116, xh: 0.5, xt: -0.42, bend: 0.02, beat: 6.0,
+    top: [0.04, 0.15, 0.24, 0.28, 0.27, 0.22, 0.15, 0.10, 0.08], bot: [0.04, 0.10, 0.13, 0.14, 0.135, 0.12, 0.10, 0.085, 0.08],
+    col: [196, 176, 142], back: [130, 114, 92], belly: [222, 210, 186], fin: [200, 188, 160], eye: [0.36, -0.08, 0.042] },
+  rasbora: { len: 128, xh: 0.5, xt: -0.40, bend: 0.028, beat: 6.5,
+    top: [0, 0.10, 0.165, 0.20, 0.20, 0.17, 0.12, 0.08, 0.065], bot: [0, 0.085, 0.15, 0.185, 0.18, 0.14, 0.095, 0.07, 0.065],
+    col: [206, 150, 114], back: [118, 86, 72], belly: [222, 196, 174], fin: [216, 162, 132], eye: [0.38, -0.03, 0.04] },
+  guppy: { len: 84, xh: 0.5, xt: -0.40, bend: 0.035, beat: 6.0,
+    top: [0, 0.08, 0.12, 0.135, 0.13, 0.11, 0.09, 0.075, 0.07], bot: [0, 0.075, 0.12, 0.15, 0.145, 0.12, 0.09, 0.075, 0.07],
+    col: [160, 168, 158], back: [96, 104, 98], belly: [192, 194, 184], fin: [222, 156, 140], eye: [0.37, -0.025, 0.048] }
+};
+(function () {
+  for (var k in SP) {
+    var s = SP[k], mt = 0, mb = 0;
+    for (var i = 0; i < s.top.length; i++) { mt = Math.max(mt, s.top[i]); mb = Math.max(mb, s.bot[i]); }
+    s.maxT = mt; s.maxB = mb;
+  }
+})();
+
+var CUR = SP.tetra, gBA = 0, gBP = 0;
+function profAt(arr, u) {
+  var p = u * (arr.length - 1), i = Math.min(arr.length - 2, p | 0), t = p - i;
+  var k = (1 - Math.cos(t * Math.PI)) / 2;
+  return arr[i] + (arr[i + 1] - arr[i]) * k;
+}
+function xAt(u) { return CUR.xh + (CUR.xt - CUR.xh) * u; }
+function cAt(u) { return gBA * Math.sin(gBP - 2.4 * u) * u * u; }
+function tAt(u) { return cAt(u) - profAt(CUR.top, u); }
+function bAt(u) { return cAt(u) + profAt(CUR.bot, u); }
+var NS = 13;
+function bodyPath() {
+  var n = 0, i, u;
+  for (i = 0; i < NS; i++) { u = i / (NS - 1); PX[n] = xAt(u); PY[n] = tAt(u); n++; }
+  var skip = (CUR.top[0] === 0 && CUR.bot[0] === 0);
+  for (i = NS - 1; i >= (skip ? 1 : 0); i--) { u = i / (NS - 1); PX[n] = xAt(u); PY[n] = bAt(u); n++; }
+  ctx.beginPath(); smoothClosed(ctx, PX, PY, n);
+}
+
+function buildFishCache(f) {
+  var sp = f.sp, hz = f.hz, c = f.cache;
+  var back = tone(sp.back, hz), col = tone(sp.col, hz), belly = tone(sp.belly, hz);
+  var rim = mixc(back, P.light, 0.55 * (1 - hz * 0.6));
+  var T = sp.maxT, B = sp.maxB;
+  var g = ctx.createLinearGradient(0, -T, 0, B);
+  g.addColorStop(0, cs(rim)); g.addColorStop(0.14, cs(back)); g.addColorStop(0.5, cs(col));
+  g.addColorStop(0.8, cs(belly)); g.addColorStop(1, cs(mulc(belly, 0.55)));
+  c.body = g;
+  var shR = f.kind === 'angel' ? 0.3 : 0.5, shA = f.kind === 'angel' ? 0.13 : 0.24;
+  g = ctx.createRadialGradient(0.14, -T * 0.45, 0, 0.14, -T * 0.45, shR);
+  g.addColorStop(0, cs(P.light, shA * (1 - hz * 0.7))); g.addColorStop(1, cs(P.light, 0));
+  c.sheen = g;
+  var fin = tone(sp.fin, hz);
+  g = ctx.createRadialGradient(0, 0, 0, 0, 0, 1.1);
+  var fa = f.kind === 'angel' ? [0.95, 0.72, 0.2] : [0.6, 0.38, 0.08];
+  g.addColorStop(0, cs(fin, fa[0])); g.addColorStop(0.5, cs(fin, fa[1])); g.addColorStop(1, cs(fin, fa[2]));
+  c.fin = g;
+  var ex = sp.eye[0], ey = sp.eye[1], er = sp.eye[2];
+  g = ctx.createRadialGradient(ex, ey, 0, ex, ey, er);
+  g.addColorStop(0, cs(tone([10, 12, 14], hz * 0.6))); g.addColorStop(0.6, cs(tone([18, 20, 22], hz * 0.6)));
+  g.addColorStop(0.82, cs(tone([170, 168, 150], hz))); g.addColorStop(1, cs(col));
+  c.eye = g;
+  c.eyeHi = cs(mixc(P.light, [255, 255, 255], 0.5), 0.6 * (1 - hz * 0.5));
+  var key = f.kind;
+  if (key === 'tetra') {
+    var glowK = 0.7 + 0.3 * P.amb;
+    var lum = clamp((P.glow - 1) * 0.3, 0, 0.4);
+    c.stripe = cs(mixc(mixc(mulc([120, 216, 206], glowK), [176, 240, 230], lum), P.haze, hz * 0.5), 0.95);
+    var red = tone([178, 78, 82], hz);
+    g = ctx.createLinearGradient(0.22, 0, -0.3, 0);
+    g.addColorStop(0, cs(red, 0)); g.addColorStop(1, cs(red, 0.85));
+    c.red = g;
+  } else if (key === 'angel') {
+    // 真珠色〜銀白の平たい菱形の体。胴とひれはひと続きで、縁へ向かって少しだけ水に溶ける
+    var pearl = tone([222, 220, 208], hz, 1.0), pearlLit = mixc(pearl, P.light, 0.3 * (1 - hz * 0.6));
+    var silver = tone([176, 182, 184], hz, 0.95);
+    g = ctx.createLinearGradient(0, -1.05, 0, 1.0);
+    g.addColorStop(0, cs(mixc(silver, P.haze, 0.25)));
+    g.addColorStop(0.26, cs(pearlLit));
+    g.addColorStop(0.5, cs(pearl));
+    g.addColorStop(0.68, cs(mixc(pearl, [226, 214, 196], 0.25)));
+    g.addColorStop(1, cs(mixc(silver, P.haze, 0.3)));
+    c.aBody = g;
+    g = ctx.createLinearGradient(0.55, -0.2, -0.45, 0.2);   // 頭側から光が回る、尾側へ少し沈む
+    g.addColorStop(0, cs(P.light, 0.16 * (1 - hz * 0.6)));
+    g.addColorStop(0.45, cs(P.light, 0));
+    g.addColorStop(1, cs([0, 0, 0], 0.16));
+    c.aSheen = g;
+    g = ctx.createRadialGradient(0.12, -0.06, 0, 0.12, -0.06, 0.5);   // 真珠のような内側の明るさ
+    g.addColorStop(0, cs(mixc([255, 252, 244], P.light, 0.3), 0.26 * (1 - hz * 0.7))); g.addColorStop(1, cs([255, 252, 244], 0));
+    c.aGlow = g;
+    var band = tone([46, 48, 54], hz);
+    g = ctx.createLinearGradient(0.55, 0, -0.55, 0);
+    var bands = [0.17, 0.45, 0.72];
+    g.addColorStop(0, cs(band, 0));
+    for (var i = 0; i < bands.length; i++) {
+      g.addColorStop(bands[i] - 0.075, cs(band, 0)); g.addColorStop(bands[i] - 0.025, cs(band, 0.34));
+      g.addColorStop(bands[i] + 0.025, cs(band, 0.34)); g.addColorStop(bands[i] + 0.075, cs(band, 0));
+    }
+    g.addColorStop(1, cs(band, 0));
+    c.bands = g;
+    g = ctx.createRadialGradient(-0.02, 0, 0.42, -0.02, 0, 1.08);
+    g.addColorStop(0, cs(P.haze, 0)); g.addColorStop(0.55, cs(P.haze, 0.1)); g.addColorStop(1, cs(P.haze, 0.42));
+    c.aEdge = g;
+    g = ctx.createRadialGradient(0, 0, 0, 0, 0, 0.52);
+    g.addColorStop(0, cs(pearl, 0.95)); g.addColorStop(0.6, cs(mixc(pearl, P.haze, 0.2), 0.8)); g.addColorStop(1, cs(mixc(silver, P.haze, 0.35), 0.5));
+    c.aTail = g;
+    c.aRay = cs(tone([120, 126, 130], hz), 0.16);
+    c.aFil = cs(mixc(pearl, P.haze, 0.15), 0.85);
+  } else if (key === 'cory') {
+    c.spot = cs(tone([70, 58, 46], hz), 0.42);
+    c.barbel = cs(tone([226, 214, 190], hz), 0.65);
+  } else if (key === 'rasbora') {
+    var dk = tone([44, 28, 40], hz);
+    g = ctx.createLinearGradient(0.05, 0, -0.45, 0);
+    g.addColorStop(0, cs(dk, 0.7)); g.addColorStop(1, cs(dk, 0.3));
+    c.patch = g;
+  } else if (key === 'guppy') {
+    var tc = mixc(tone(sp.fin, hz, 0.85 + 0.15 / Math.max(0.5, P.amb)), P.haze, 0);
+    g = ctx.createRadialGradient(0, 0, 0, 0, 0, 0.95);
+    g.addColorStop(0, cs(tc, 0.85)); g.addColorStop(0.55, cs(tc, 0.55)); g.addColorStop(1, cs(tc, 0.2));
+    c.tail = g;
+    c.ray = cs(mixc(tc, P.light, 0.4), 0.18);
+  }
+  f.cv = palVer;
+}
+
+function tailFork(l, h, notch, pw) {
+  ctx.beginPath(); ctx.moveTo(0.03, -pw);
+  ctx.quadraticCurveTo(-l * 0.45, -h * 0.5, -l, -h);
+  ctx.quadraticCurveTo(-l * 0.8, -h * 0.25, -l * notch, 0);
+  ctx.quadraticCurveTo(-l * 0.8, h * 0.25, -l, h);
+  ctx.quadraticCurveTo(-l * 0.45, h * 0.5, 0.03, pw);
+  ctx.closePath(); ctx.fill();
+}
+function drawTail(f, kind) {
+  var x0 = CUR.xt + 0.03, y0 = cAt(1);
+  var lat = Math.sin(gBP - 2.8);
+  var fs = Math.cos(0.85 * lat);
+  var rot = gBA * 2.4 * Math.sin(gBP - 3.0);
+  var pw = profAt(CUR.top, 1);
+  ctx.save(); ctx.translate(x0, y0); ctx.rotate(rot); ctx.scale(fs, 1);
+  if (kind === 'tetra') tailFork(0.32, 0.18, 0.5, pw);
+  else if (kind === 'rasbora') tailFork(0.40, 0.27, 0.5, pw);
+  else if (kind === 'cory') tailFork(0.30, 0.21, 0.62, pw);
+  else if (kind === 'angel') {
+    var l = 0.36, h = 0.3;
+    ctx.beginPath(); ctx.moveTo(0.03, -pw);
+    ctx.quadraticCurveTo(-l * 0.5, -h * 0.6, -l * 1.35, -h * 1.3);
+    ctx.quadraticCurveTo(-l * 0.95, -h * 0.4, -l * 0.92, 0);
+    ctx.quadraticCurveTo(-l * 0.95, h * 0.4, -l * 1.35, h * 1.3);
+    ctx.quadraticCurveTo(-l * 0.5, h * 0.6, 0.03, pw);
+    ctx.closePath(); ctx.fill();
+  } else if (kind === 'guppy') {
+    var gl = 0.9, gh = 0.52, sw = 0.05 * Math.sin(gBP * 0.7);
+    ctx.fillStyle = f.cache.tail;
+    ctx.beginPath(); ctx.moveTo(0.03, -pw);
+    ctx.quadraticCurveTo(-gl * 0.3, -gh * 0.35, -gl * 0.95, -gh + sw);
+    ctx.quadraticCurveTo(-gl * 1.12, sw, -gl * 0.95, gh + sw);
+    ctx.quadraticCurveTo(-gl * 0.3, gh * 0.35, 0.03, pw);
+    ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = f.cache.ray; ctx.lineWidth = 0.012;
+    ctx.beginPath();
+    for (var r = -2; r <= 2; r++) { ctx.moveTo(-0.05, r * pw * 0.3); ctx.quadraticCurveTo(-gl * 0.5, r * gh * 0.2, -gl * 0.92, r * gh * 0.36 + sw); }
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+function pectoral(fl) {
+  var c = cAt(0.26), fy = 0.02 * fl;
+  ctx.beginPath();
+  ctx.moveTo(xAt(0.24), c + 0.03);
+  ctx.quadraticCurveTo(xAt(0.31), c + 0.11 + fy, xAt(0.42), c + 0.07 + fy);
+  ctx.quadraticCurveTo(xAt(0.33), c + 0.045, xAt(0.24), c + 0.03);
+  ctx.fill();
+}
+function drawEye(c) {
+  var e = CUR.eye, ex = e[0], ey = cAt(0.12) + e[1], er = e[2];
+  ctx.save(); ctx.translate(0, ey - e[1]);
+  ctx.fillStyle = c.eye; ctx.beginPath(); ctx.arc(ex, e[1], er, 0, TAU); ctx.fill();
+  ctx.fillStyle = c.eyeHi; ctx.beginPath(); ctx.arc(ex + er * 0.3, e[1] - er * 0.32, er * 0.28, 0, TAU); ctx.fill();
+  ctx.restore();
+}
+
+function angelPath(fl, b) {
+  var df = fl * 0.035, dy = fl * 0.025;
+  ctx.beginPath();
+  ctx.moveTo(0.55, 0.02 + b * 0.1);
+  ctx.quadraticCurveTo(0.50, -0.14, 0.36, -0.27);                      // 額
+  ctx.quadraticCurveTo(0.22, -0.40, 0.04, -0.46);                      // 背の丸み
+  ctx.quadraticCurveTo(-0.10, -0.52, -0.22, -0.70);
+  ctx.quadraticCurveTo(-0.34, -0.88, -0.52 + df, -1.04 + dy);          // 背びれの先
+  ctx.quadraticCurveTo(-0.42, -0.62, -0.38, -0.24);
+  ctx.quadraticCurveTo(-0.40, -0.10, -0.47, -0.075 + b);
+  ctx.lineTo(-0.47, 0.075 + b);
+  ctx.quadraticCurveTo(-0.40, 0.10, -0.37, 0.24);
+  ctx.quadraticCurveTo(-0.40, 0.60, -0.48 - df, 1.0 - dy);             // 尻びれの先
+  ctx.quadraticCurveTo(-0.30, 0.82, -0.18, 0.64);
+  ctx.quadraticCurveTo(-0.08, 0.48, 0.06, 0.44);
+  ctx.quadraticCurveTo(0.24, 0.38, 0.38, 0.24);                        // 腹の丸み
+  ctx.quadraticCurveTo(0.50, 0.13, 0.55, 0.02 + b * 0.1);
+  ctx.closePath();
+}
+function drawAngel(f, c, fl) {
+  var b = cAt(1) * 0.6;
+  // 腹びれの長い糸（体の奥側から垂れる）
+  ctx.fillStyle = c.aFil;
+  ctx.beginPath(); ctx.moveTo(0.27, 0.3);
+  ctx.quadraticCurveTo(0.25, 0.74, 0.06 + fl * 0.05, 1.22);
+  ctx.quadraticCurveTo(0.19, 0.72, 0.21, 0.32); ctx.closePath(); ctx.fill();
+  // 尾
+  ctx.fillStyle = c.aTail;
+  drawTail(f, 'angel');
+  // 体とひれ（ひと続き）
+  angelPath(fl, b);
+  ctx.fillStyle = c.aBody; ctx.fill();
+  ctx.fillStyle = c.aSheen; ctx.fill();
+  ctx.fillStyle = c.aGlow; ctx.fill();
+  ctx.fillStyle = c.bands; ctx.fill();
+  ctx.fillStyle = c.aEdge; ctx.fill();
+  // ひれの筋（ごく淡く）
+  ctx.strokeStyle = c.aRay; ctx.lineWidth = 0.007; ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(-0.04, -0.46); ctx.quadraticCurveTo(-0.24, -0.76, -0.49, -0.99);
+  ctx.moveTo(-0.14, -0.43); ctx.quadraticCurveTo(-0.3, -0.66, -0.45, -0.84);
+  ctx.moveTo(-0.25, -0.38); ctx.quadraticCurveTo(-0.35, -0.5, -0.4, -0.62);
+  ctx.moveTo(-0.02, 0.44); ctx.quadraticCurveTo(-0.22, 0.72, -0.46, 0.95);
+  ctx.moveTo(-0.14, 0.42); ctx.quadraticCurveTo(-0.3, 0.62, -0.43, 0.8);
+  ctx.moveTo(-0.25, 0.36); ctx.quadraticCurveTo(-0.34, 0.48, -0.39, 0.58);
+  ctx.stroke();
+  drawEye(c);
+}
+
+function drawFish(f) {
+  var sp = f.sp, c = f.cache, kind = f.kind;
+  if (f.cv !== palVer) buildFishCache(f);
+  CUR = sp;
+  var spd = Math.min(1.5, Math.hypot(f.vx, f.vy) / f.cruise);
+  gBA = sp.bend * (0.45 + 0.55 * spd); gBP = f.swim;
+  // 向き替えは横幅を縮めて表す（真横から正面へ回り込む見え方）。傾きは face に比例させ、反転の瞬間に跳ねないようにする
+  var af = Math.min(1, Math.abs(f.face));
+  var fx = (f.face >= 0 ? 1 : -1) * (0.18 + 0.82 * af);
+  var fl = Math.sin(f.swim * 0.5 + f.seed);
+  ctx.save();
+  ctx.translate(f.x, f.y);
+  ctx.rotate(f.pitch * clamp(f.face, -1, 1));
+  ctx.scale(fx * f.sz, f.sz);
+
+  if (kind === 'angel') { drawAngel(f, c, fl); ctx.restore(); return; }
+
+  // 奥側のひれ
+  ctx.fillStyle = c.fin;
+  if (kind === 'tetra') {
+    ctx.beginPath(); ctx.moveTo(xAt(0.38), tAt(0.38) + 0.01);
+    ctx.quadraticCurveTo(xAt(0.40), tAt(0.40) - 0.10, xAt(0.5) - 0.03, tAt(0.5) - 0.12 + fl * 0.01);
+    ctx.quadraticCurveTo(xAt(0.53), tAt(0.53) - 0.04, xAt(0.57), tAt(0.57) + 0.01); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(xAt(0.52), bAt(0.52) - 0.01);
+    ctx.quadraticCurveTo(xAt(0.6), bAt(0.6) + 0.09, xAt(0.8), bAt(0.8) + 0.05 + fl * 0.01);
+    ctx.quadraticCurveTo(xAt(0.8), bAt(0.8), xAt(0.84), bAt(0.84) - 0.01); ctx.fill();
+  } else if (kind === 'cory') {
+    ctx.beginPath(); ctx.moveTo(xAt(0.22), tAt(0.22) + 0.02);
+    ctx.quadraticCurveTo(xAt(0.25), tAt(0.25) - 0.22, xAt(0.33), tAt(0.3) - 0.24 + fl * 0.01);
+    ctx.quadraticCurveTo(xAt(0.4), tAt(0.4) - 0.08, xAt(0.46), tAt(0.46) + 0.02); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(xAt(0.78), tAt(0.78) + 0.01);
+    ctx.quadraticCurveTo(xAt(0.83), tAt(0.83) - 0.07, xAt(0.88), tAt(0.88) + 0.01); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(xAt(0.6), bAt(0.6) - 0.01);
+    ctx.quadraticCurveTo(xAt(0.68), bAt(0.66) + 0.09, xAt(0.78), bAt(0.78) - 0.01); ctx.fill();
+  } else if (kind === 'rasbora') {
+    ctx.beginPath(); ctx.moveTo(xAt(0.4), tAt(0.4) + 0.01);
+    ctx.quadraticCurveTo(xAt(0.43), tAt(0.43) - 0.14, xAt(0.52), tAt(0.5) - 0.15 + fl * 0.01);
+    ctx.quadraticCurveTo(xAt(0.55), tAt(0.55) - 0.05, xAt(0.6), tAt(0.6) + 0.01); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(xAt(0.55), bAt(0.55) - 0.01);
+    ctx.quadraticCurveTo(xAt(0.6), bAt(0.6) + 0.11, xAt(0.72), bAt(0.72) + 0.07);
+    ctx.quadraticCurveTo(xAt(0.74), bAt(0.74), xAt(0.78), bAt(0.78) - 0.01); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(xAt(0.3), bAt(0.3) - 0.01);
+    ctx.quadraticCurveTo(xAt(0.36), bAt(0.36) + 0.09, xAt(0.44), bAt(0.42) + 0.08);
+    ctx.quadraticCurveTo(xAt(0.42), bAt(0.42), xAt(0.44), bAt(0.44) - 0.01); ctx.fill();
+  } else if (kind === 'guppy') {
+    ctx.beginPath(); ctx.moveTo(xAt(0.45), tAt(0.45) + 0.01);
+    ctx.quadraticCurveTo(xAt(0.5), tAt(0.5) - 0.16, xAt(0.82) - 0.06, tAt(0.75) - 0.18 + fl * 0.02);
+    ctx.quadraticCurveTo(xAt(0.75), tAt(0.75) - 0.04, xAt(0.85), tAt(0.85) + 0.01); ctx.fill();
+  }
+
+  drawTail(f, kind);
+
+  // 胴
+  bodyPath();
+  ctx.fillStyle = c.body; ctx.fill();
+
+  if (kind === 'tetra') {
+    // 下半身後方の赤
+    var n = 0, i, u;
+    for (i = 3; i < NS; i++) { u = i / (NS - 1); PX[n] = xAt(u); PY[n] = cAt(u) + 0.01; n++; }
+    for (i = NS - 1; i >= 3; i--) { u = i / (NS - 1); PX[n] = xAt(u); PY[n] = bAt(u) - 0.004; n++; }
+    ctx.fillStyle = c.red; ctx.beginPath(); smoothClosed(ctx, PX, PY, n); ctx.fill();
+    // 光る帯
+    n = 0;
+    for (i = 1; i <= 9; i++) { u = 0.08 + i / 9 * 0.68; PX[n] = xAt(u); PY[n] = cAt(u) - 0.018 - 0.016 * Math.sin(Math.PI * i / 9); n++; }
+    for (i = 9; i >= 1; i--) { u = 0.08 + i / 9 * 0.68; PX[n] = xAt(u); PY[n] = cAt(u) - 0.012 + 0.014 * Math.sin(Math.PI * i / 9); n++; }
+    ctx.fillStyle = c.stripe; ctx.beginPath(); smoothClosed(ctx, PX, PY, n); ctx.fill();
+  } else if (kind === 'rasbora') {
+    ctx.fillStyle = c.patch; ctx.beginPath();
+    ctx.moveTo(xAt(0.4), tAt(0.4) + 0.05);
+    ctx.quadraticCurveTo(xAt(0.7), cAt(0.7) - 0.03, xAt(0.97), cAt(0.97));
+    ctx.quadraticCurveTo(xAt(0.7), cAt(0.7) + 0.05, xAt(0.42), bAt(0.42) - 0.06);
+    ctx.quadraticCurveTo(xAt(0.36), cAt(0.4), xAt(0.4), tAt(0.4) + 0.05);
+    ctx.fill();
+  } else if (kind === 'cory') {
+    ctx.fillStyle = c.spot; ctx.beginPath();
+    var sp7 = f.spots;
+    for (var k = 0; k < sp7.length; k += 2) {
+      var sx = xAt(sp7[k]), sy = cAt(sp7[k]) + sp7[k + 1];
+      ctx.moveTo(sx + 0.024, sy); ctx.ellipse(sx, sy, 0.024, 0.017, 0, 0, TAU);
+    }
+    ctx.fill();
+    ctx.strokeStyle = c.barbel; ctx.lineWidth = 0.013; ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(CUR.xh - 0.03, 0.02); ctx.quadraticCurveTo(CUR.xh + 0.03, 0.08, CUR.xh - 0.0, 0.13);
+    ctx.moveTo(CUR.xh - 0.06, 0.03); ctx.quadraticCurveTo(CUR.xh - 0.03, 0.09, CUR.xh - 0.06, 0.13);
+    ctx.stroke();
+  }
+  // 背の丸みと光
+  bodyPath();
+  ctx.fillStyle = c.sheen; ctx.fill();
+
+  drawEye(c);
+  ctx.fillStyle = c.fin;
+  pectoral(Math.sin(f.swim * 1.3 + f.seed));
+
+  // 発光（体の周りのにじみ）
+  if (kind === 'tetra' || kind === 'guppy') {
+    ctx.globalCompositeOperation = 'lighter';
+    if (kind === 'tetra') {
+      ctx.globalAlpha = clamp(0.22 * P.glow * (1 - f.hz * 0.5), 0, 1);
+      ctx.drawImage(spr.teal, -0.62, -0.32, 1.4, 0.56);
+      ctx.globalAlpha = clamp(0.12 * (P.glow - 0.6) * (1 - f.hz * 0.5), 0, 1);
+      ctx.drawImage(spr.teal, -0.3, -0.1, 0.8, 0.16);
+    } else {
+      ctx.globalAlpha = clamp(Math.min(0.42, 0.22 * P.glow) * (1 - f.hz * 0.5), 0, 1);
+      ctx.drawImage(spr.warm, CUR.xt - 1.05, -0.6, 1.2, 1.2);
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+  }
+  ctx.restore();
+}
+
+/* ---------- 魚の動き ---------- */
+var fishes = [];
+var anchor = null;     // 群れの中心（描かない）
+var MAX_AWAY = 3;      // 同時に画面外へ出ている個体／群れの上限
+
+function newFish(kind, z, o) {
+  var sp = SP[kind];
+  var f = {
+    kind: kind, sp: sp, z: z, hz: 0.08 + 0.6 * z, szF: sp.len * (1 - 0.32 * z) * rnd(0.92, 1.08), sz: 1,
+    x: 0, y: 0, vx: 0, vy: 0, dir: Math.random() < 0.5 ? -1 : 1, cruiseS: o.cruise * rnd(0.88, 1.12), cruise: 1,
+    face: 1, pitch: 0, swim: rnd(0, TAU), seed: rnd(0, TAU), beat: sp.beat * rnd(0.9, 1.1),
+    wa: rnd(0, TAU), wb: rnd(0, TAU), wc: rnd(0, TAU), wfa: rnd(0.05, 0.09), wfb: rnd(0.11, 0.19), wfc: rnd(0.02, 0.05),
+    yMinF: o.yr[0], yMaxF: o.yr[1], leave: o.leave || 0, turn: o.turn || 0.35,
+    state: 'swim', awayT: 0, decided: false, leaving: false, member: !!o.member,
+    mox: 0, moy: 0, mpa: rnd(0, TAU), mpf: rnd(0.08, 0.16), mrx: 0, mry: 0,
+    arc: 1, rest: 0, moving: true, timer: rnd(2, 6), cache: {}, cv: -1, spots: null
+  };
+  f.face = f.dir;
+  f.faceDir = f.dir;
+  if (kind === 'cory') f.spots = [0.3, -0.05, 0.42, 0.0, 0.5, -0.08, 0.6, -0.02, 0.7, -0.06, 0.78, 0.0, 0.55, 0.05, 0.38, -0.1];
+  return f;
+}
+function sizeFish(f) { f.sz = f.szF * S; f.cruise = f.cruiseS * S; }
+
+function spawnAll() {
+  fishes = [];
+  var list = [];
+  // 主役（エンゼル）
+  list.push(newFish('angel', 0.12, { cruise: 20, yr: [0.2, 0.6], leave: 0.3, turn: 0.22 }));
+  list.push(newFish('angel', 0.68, { cruise: 16, yr: [0.18, 0.62], leave: 0.35, turn: 0.22 }));
+  // ラスボラ
+  var rz = [0.2, 0.42, 0.62, 0.8];
+  for (var i = 0; i < 4; i++) list.push(newFish('rasbora', rz[i], { cruise: 36, yr: [0.12, 0.7], leave: 0.4, turn: 0.45 }));
+  // グッピー（尾がほんのり光る）
+  var gz = [0.25, 0.5, 0.74];
+  for (i = 0; i < 3; i++) list.push(newFish('guppy', gz[i], { cruise: 26, yr: [0.1, 0.62], leave: 0.3, turn: 0.5 }));
+  // コリドラス（底）
+  var cz = [0.04, 0.14, 0.26];
+  for (i = 0; i < 3; i++) list.push(newFish('cory', cz[i], { cruise: 15, yr: [0.8, 0.95], turn: 0.7 }));
+  // 群れ（テトラ 8 匹）
+  anchor = newFish('tetra', 0.34, { cruise: 30, yr: [0.2, 0.55], leave: 0.2, turn: 0.32 });
+  // 進行方向に長いゆるい隊形（横に並べた位置を少しずつずらす）。個体は小さく前後上下に揺れるだけ
+  for (i = 0; i < 8; i++) {
+    var m = newFish('tetra', 0.3 + rnd(0, 0.1), { cruise: 30, yr: [0.1, 0.8], member: true });
+    m.mox = lerp(-150, 150, i / 7) + rnd(-18, 18);
+    m.moy = (i % 2 ? 1 : -1) * rnd(10, 44) + rnd(-8, 8);
+    m.mrx = rnd(8, 16); m.mry = rnd(5, 10);
+    list.push(m);
+  }
+  fishes = list;
+  fishes.forEach(sizeFish);
+  sizeFish(anchor);
+  // 初期配置: 画面全体へ均して散らす（横を等分し、乱数で揺らす）
+  var solo = fishes.filter(function (f) { return !f.member; });
+  for (i = 0; i < solo.length; i++) solo[i]._ord = Math.random();
+  solo.sort(function (a, b) { return a._ord - b._ord; });
+  for (i = 0; i < solo.length; i++) {
+    var f = solo[i];
+    f.x = W * (0.08 + 0.84 * (i + rnd(0.15, 0.85)) / solo.length);
+    f.y = lerp(f.yMinF, f.yMaxF, rnd(0.15, 0.85)) * H;
+    f.vx = f.dir * f.cruise; f.face = f.dir;
+    if (f.kind === 'cory') f.y = coryY(f);
+  }
+  anchor.x = W * rnd(0.35, 0.6); anchor.y = H * rnd(0.3, 0.45);
+  anchor.vx = anchor.dir * anchor.cruise; anchor.face = anchor.dir;
+  for (i = 0; i < fishes.length; i++) {
+    var mm = fishes[i];
+    if (!mm.member) continue;
+    mm.x = anchor.x + mm.mox * S; mm.y = anchor.y + mm.moy * S; mm.vx = anchor.vx; mm.face = anchor.dir; mm.cruise = anchor.cruise;
+  }
+}
+function coryY(f) { return sandAt(f.x) + (0.032 - 0.05 * f.z) * H - f.sz * 0.1; }
+
+function awayCount() {
+  var n = 0;
+  for (var i = 0; i < fishes.length; i++) { var f = fishes[i]; if (!f.member && (f.state === 'away' || f.leaving)) n++; }
+  if (anchor.state === 'away' || anchor.leaving) n += 3;  // 群れが居ない間は他の魚を外へ出さない
+  return n;
+}
+function mayLeave(f) {
+  if (!f.leave || Math.random() >= f.leave) return false;
+  if (awayCount() >= MAX_AWAY) return false;
+  if (f === anchor && awayCount() > 0) return false;  // 群れは他に誰も出ていないときだけ外へ
+  // 主役 2 匹と群れが同時に居なくならないように
+  if (f.kind === 'angel' || f === anchor) {
+    var gone = 0;
+    for (var i = 0; i < fishes.length; i++) if (fishes[i].kind === 'angel' && (fishes[i].state === 'away' || fishes[i].leaving)) gone++;
+    if (anchor.state === 'away' || anchor.leaving) gone++;
+    if (gone >= 1) return false;
+  }
+  return true;
+}
+function faceAndPitch(f, dt, ref) {
+  if (Math.abs(f.vx) > 0.04 * ref) {
+    var ft = clamp(f.vx / (0.6 * ref), -1, 1);
+    f.face += (ft - f.face) * Math.min(1, dt * 3);
+  }
+  var pt = clamp(Math.atan2(f.vy, Math.abs(f.vx) + 0.3 * ref), -0.3, 0.3);
+  f.pitch += (pt - f.pitch) * Math.min(1, dt * 1.5);
+  var spd = Math.hypot(f.vx, f.vy) / ref;
+  f.swim = wrapA(f.swim + dt * f.beat * (0.55 + 0.75 * Math.min(1.6, spd)));
+}
+function extOf(f) { return f === anchor ? 260 * S : f.sz * 1.8 + 20 * S; }
+
+function updateSwimmer(f, dt) {
+  f.wa = wrapA(f.wa + f.wfa * TAU * dt); f.wb = wrapA(f.wb + f.wfb * TAU * dt); f.wc = wrapA(f.wc + f.wfc * TAU * dt);
+  if (f.state === 'away') {
+    f.awayT -= dt;
+    if (f.awayT <= 0) respawn(f);
+    return;
+  }
+  var yMin = f.yMinF * H, yMax = f.yMaxF * H, ext = extOf(f);
+  var vyT = f.cruise * 0.32 * (Math.sin(f.wa) * 0.7 + Math.sin(f.wb) * 0.3);
+  // 向きを変えている間は、決めた側（上か下）へゆるく弧を描く
+  var turning = f.dir * f.vx < 0.8 * f.cruise;
+  if (turning) vyT += f.arc * f.cruise * 0.45 * (1 - Math.min(1, Math.abs(f.vx) / f.cruise));
+  if (f.y < yMin) vyT += (yMin - f.y) * 0.3;
+  if (f.y > yMax) vyT -= (f.y - yMax) * 0.3;
+  var m = W * 0.07 + f.sz * 0.6;
+  if (!f.leaving) {
+    if (f.dir > 0 && f.x > W - m) { if (!f.decided) { f.decided = true; if (mayLeave(f)) f.leaving = true; else { f.dir = -1; f.arc = f.y > (yMin + yMax) / 2 ? -1 : 1; } } }
+    else if (f.dir < 0 && f.x < m) { if (!f.decided) { f.decided = true; if (mayLeave(f)) f.leaving = true; else { f.dir = 1; f.arc = f.y > (yMin + yMax) / 2 ? -1 : 1; } } }
+    else f.decided = false;
+  } else if (f.x > W + ext || f.x < -ext) {
+    var allOut = true;
+    if (f === anchor) {
+      for (var i = 0; i < fishes.length; i++) {
+        var mm = fishes[i];
+        if (mm.member && mm.x > -mm.sz && mm.x < W + mm.sz) { allOut = false; break; }
+      }
+    }
+    if (allOut) { f.state = 'away'; f.leaving = false; f.awayT = f === anchor ? rnd(12, 35) : rnd(20, 100); setMembers(f, 'away'); return; }
+  }
+  var sp = f.cruise * (0.8 + 0.2 * Math.sin(f.wc));
+  var vxT = f.dir * sp;
+  f.vx += (vxT - f.vx) * Math.min(1, dt * f.turn);
+  f.vy += (vyT - f.vy) * Math.min(1, dt * 0.8);
+  f.x += f.vx * dt; f.y += f.vy * dt;
+  faceAndPitch(f, dt, f.cruise);
+}
+function setMembers(f, st) {
+  if (f !== anchor) return;
+  for (var i = 0; i < fishes.length; i++) if (fishes[i].member) fishes[i].state = st;
+}
+function respawn(f) {
+  var side = Math.random() < 0.5 ? -1 : 1, ext = extOf(f);
+  f.x = side < 0 ? -ext : W + ext;
+  f.dir = -side;
+  f.y = lerp(f.yMinF, f.yMaxF, rnd(0.15, 0.85)) * H;
+  f.vx = f.dir * f.cruise; f.vy = 0; f.face = f.dir; f.pitch = 0;
+  f.state = 'swim'; f.leaving = false; f.decided = false;
+  if (f === anchor) {
+    for (var i = 0; i < fishes.length; i++) {
+      var m = fishes[i];
+      if (!m.member) continue;
+      m.state = 'swim';
+      m.x = f.x + m.mox * S + side * 40 * S; m.y = f.y + m.moy * S;
+      m.vx = f.vx; m.vy = 0; m.face = f.dir;
+    }
+  }
+}
+function updateMember(m, dt) {
+  if (m.state === 'away') return;
+  var A = anchor;
+  m.mpa = wrapA(m.mpa + m.mpf * TAU * dt);
+  var tx = A.x + (m.mox + Math.sin(m.mpa) * m.mrx) * S;
+  var ty = A.y + (m.moy + Math.sin(m.mpa * 1.37 + m.seed) * m.mry) * S;
+  var dvx = (tx - m.x) * 0.5 + A.vx, dvy = (ty - m.y) * 0.5 + A.vy;
+  var r0 = 44 * S;
+  for (var i = 0; i < fishes.length; i++) {
+    var o = fishes[i];
+    if (o === m || !o.member) continue;
+    var dx = m.x - o.x, dy = m.y - o.y, d2 = dx * dx + dy * dy;
+    if (d2 < r0 * r0 && d2 > 1e-6) { var d = Math.sqrt(d2), k = (r0 - d) / d * 1.2; dvx += dx * k; dvy += dy * k; }
+  }
+  var vmax = A.cruise * 1.7, v = Math.hypot(dvx, dvy);
+  if (v > vmax) { dvx *= vmax / v; dvy *= vmax / v; }
+  m.vx += (dvx - m.vx) * Math.min(1, dt * 1.4);
+  m.vy += (dvy - m.vy) * Math.min(1, dt * 1.4);
+  m.x += m.vx * dt; m.y += m.vy * dt;
+  m.cruise = A.cruise;
+  faceAndPitch(m, dt, A.cruise);
+}
+function updateCory(f, dt) {
+  f.wa = wrapA(f.wa + f.wfa * TAU * dt);
+  f.timer -= dt;
+  if (f.timer <= 0) {
+    f.moving = !f.moving;
+    f.timer = f.moving ? rnd(4, 10) : rnd(2, 7);
+    if (f.moving && Math.random() < 0.3) f.dir = -f.dir;
+  }
+  if (f.dir > 0 && f.x > W * 0.93) f.dir = -1;
+  if (f.dir < 0 && f.x < W * 0.07) f.dir = 1;
+  var vxT = f.moving ? f.dir * f.cruise * (0.85 + 0.15 * Math.sin(f.wa)) : 0;
+  f.vx += (vxT - f.vx) * Math.min(1, dt * f.turn);
+  f.x += f.vx * dt;
+  var yT = coryY(f) + Math.sin(f.wa * 2) * 3 * S;
+  f.vy = (yT - f.y) * 1.2;
+  f.y += f.vy * dt;
+  // 休んでいる間も向きを保つ（速度ゼロで細く見えないように）
+  if (Math.abs(f.vx) > 0.15 * f.cruise) f.faceDir = f.vx > 0 ? 1 : -1;
+  f.face += (f.faceDir - f.face) * Math.min(1, dt * 1.6);
+  var pt = f.moving ? 0.0 : 0.12;
+  f.pitch += (pt - f.pitch) * Math.min(1, dt * 0.8);
+  f.swim = wrapA(f.swim + dt * f.beat * (f.moving ? 0.9 : 0.35));
+}
+
+/* ================= 泡・粒・光 ================= */
+var MAX_BUB = 80;
+var bubbles = [];
+for (var bi = 0; bi < MAX_BUB; bi++) bubbles.push({ on: false, x: 0, y: 0, r: 0, vy: 0, ph: 0, pf: 0, amp: 0 });
+var emitters = [
+  { xF: 0.845, x: 0, y: 0, idle: rnd(1, 6), burst: 0, rate: 0, acc: 0 },
+  { xF: 0.195, x: 0, y: 0, idle: rnd(10, 25), burst: 0, rate: 0, acc: 0 }
+];
+function spawnBubble(e) {
+  for (var i = 0; i < MAX_BUB; i++) {
+    var b = bubbles[i];
+    if (b.on) continue;
+    b.on = true; b.x = e.x + rnd(-3, 3) * S; b.y = e.y; b.r = rnd(2.2, 4.6) * S;
+    b.vy = -rnd(48, 70) * S; b.ph = rnd(0, TAU); b.pf = rnd(2.5, 5); b.amp = rnd(1, 3.2) * S;
+    return;
+  }
+}
+var NPART = 90;
+var parts = [];
+for (var qi = 0; qi < NPART; qi++) {
+  parts.push({ xF: Math.random(), yF: Math.random(), x: 0, y: 0, z: Math.random(), vx: rnd(-5, 5), vy: rnd(-3, 2), tw: rnd(0, TAU), tf: rnd(0.15, 0.6), wp: rnd(0, TAU), wf: rnd(0.05, 0.15) });
+}
+var caus = [];
+for (var ci = 0; ci < 16; ci++) caus.push({ xF: Math.random(), x: 0, dy: rnd(0.02, 0.75), w: rnd(150, 280), h: rnd(26, 46), vx: rnd(-9, 9), ph: rnd(0, TAU), pf: rnd(0.03, 0.08) });
+var shafts = [];
+for (var si = 0; si < 7; si++) {
+  shafts.push({ xF: 0.1 + si / 6 * 0.8 + rnd(-0.05, 0.05), w: rnd(90, 260), ang: rnd(-0.2, -0.12), a: rnd(0.05, 0.1), pa: rnd(0, TAU), pfa: rnd(0.012, 0.03), pb: rnd(0, TAU), pfb: rnd(0.02, 0.05), front: si % 3 === 1 });
+}
+
+function layoutParticles(oldW, oldH) {
+  for (var i = 0; i < parts.length; i++) {
+    var p = parts[i];
+    if (oldW) { p.x = p.x / oldW * W; p.y = p.y / oldH * H; }
+    else { p.x = p.xF * W; p.y = p.yF * H; }
+  }
+  for (i = 0; i < caus.length; i++) caus[i].x = caus[i].xF * W;
+  for (i = 0; i < emitters.length; i++) { var e = emitters[i]; e.x = e.xF * W; e.y = sandAt(e.x) - 2 * S; }
+}
+
+/* ================= シミュレーション ================= */
+var simTime = 0, cyc = 0;
+function step(dt) {
+  simTime += dt; simSinceBuild += dt;
+  cyc += dt; if (cyc >= CYCLE) cyc -= CYCLE;
+  g1 = wrapA(g1 + 0.23 * dt); g2 = wrapA(g2 + 0.137 * dt); g3 = wrapA(g3 + 0.41 * dt);
+  var L, i, j;
+  for (L in scene) {
+    var gs = scene[L];
+    for (i = 0; i < gs.length; i++) for (j = 0; j < gs[i].blades.length; j++) { var b = gs[i].blades[j]; b.bp = wrapA(b.bp + b.bw * dt); }
+  }
+  updateSwimmer(anchor, dt);
+  for (i = 0; i < fishes.length; i++) {
+    var f = fishes[i];
+    if (f.member) updateMember(f, dt);
+    else if (f.kind === 'cory') updateCory(f, dt);
+    else updateSwimmer(f, dt);
+  }
+  // 泡
+  for (i = 0; i < emitters.length; i++) {
+    var e = emitters[i];
+    if (e.burst > 0) {
+      e.burst -= dt; e.acc += e.rate * dt;
+      while (e.acc >= 1) { spawnBubble(e); e.acc -= 1; }
+    } else {
+      e.idle -= dt;
+      if (e.idle <= 0) { e.burst = rnd(2.5, 8); e.rate = rnd(2, 4.5); e.idle = rnd(10, 45); e.acc = 0; }
+    }
+  }
+  for (i = 0; i < MAX_BUB; i++) {
+    var bb = bubbles[i];
+    if (!bb.on) continue;
+    bb.y += bb.vy * dt;
+    bb.vy *= (1 + 0.04 * dt);
+    if (bb.vy < -110 * S) bb.vy = -110 * S;
+    bb.r = Math.min(bb.r * (1 + 0.015 * dt), 7 * S);
+    bb.ph = wrapA(bb.ph + bb.pf * dt);
+    if (bb.y < -10 * S) bb.on = false;
+  }
+  // 粒
+  for (i = 0; i < parts.length; i++) {
+    var p = parts[i];
+    p.tw = wrapA(p.tw + p.tf * TAU * dt); p.wp = wrapA(p.wp + p.wf * TAU * dt);
+    p.x += (p.vx + Math.sin(p.wp) * 4) * S * dt; p.y += (p.vy + Math.cos(p.wp * 1.3) * 2) * S * dt;
+    var mg = 20 * S;
+    if (p.x < -mg) p.x += W + 2 * mg; else if (p.x > W + mg) p.x -= W + 2 * mg;
+    if (p.y < -mg) p.y += H + 2 * mg; else if (p.y > H + mg) p.y -= H + 2 * mg;
+  }
+  for (i = 0; i < caus.length; i++) {
+    var c = caus[i];
+    c.ph = wrapA(c.ph + c.pf * TAU * dt);
+    c.x += c.vx * S * dt;
+    var cw = c.w * S;
+    if (c.x < -cw) c.x += W + 2 * cw; else if (c.x > W + cw) c.x -= W + 2 * cw;
+  }
+  for (i = 0; i < shafts.length; i++) {
+    var s = shafts[i];
+    s.pa = wrapA(s.pa + s.pfa * TAU * dt); s.pb = wrapA(s.pb + s.pfb * TAU * dt);
+  }
+}
+
+/* ================= 描画 ================= */
+var drawList = [];
+function drawShafts(front) {
+  ctx.globalCompositeOperation = 'lighter';
+  var len = H * 1.05;
+  for (var i = 0; i < shafts.length; i++) {
+    var s = shafts[i];
+    if (s.front !== front) continue;
+    var a = s.a * (0.55 + 0.45 * Math.sin(s.pa)) * (0.45 + 0.55 * P.amb) * (front ? 0.55 : 1);
+    if (a <= 0.003) continue;
+    ctx.save();
+    ctx.translate(s.xF * W + Math.sin(s.pb) * 30 * S, -H * 0.04);
+    ctx.rotate(s.ang + Math.sin(s.pb * 0.7 + i) * 0.025);
+    var w = s.w * S * (0.85 + 0.15 * Math.sin(s.pa * 1.7));
+    ctx.globalAlpha = a;
+    ctx.drawImage(spr.shaft, -w / 2, 0, w, len);
+    ctx.restore();
+  }
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+}
+function drawCaustics() {
+  ctx.globalCompositeOperation = 'lighter';
+  for (var i = 0; i < caus.length; i++) {
+    var c = caus[i];
+    var a = (0.08 + 0.1 * Math.sin(c.ph)) * P.amb * Math.min(1.3, P.lk);
+    if (a <= 0.004) continue;
+    var st = sandAt(clamp(c.x, 0, W)) + 8 * S, y = st + c.dy * (H - st);
+    var k = 0.75 + 0.6 * c.dy;   // 手前ほど大きく
+    ctx.globalAlpha = Math.min(1, a);
+    ctx.drawImage(spr.light, c.x - c.w * S * k / 2, y - c.h * S * k / 2, c.w * S * k, c.h * S * k);
+  }
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+}
+function drawBubbles() {
+  for (var i = 0; i < MAX_BUB; i++) {
+    var b = bubbles[i];
+    if (!b.on) continue;
+    var a = clamp(b.y / (H * 0.12), 0, 1) * (0.55 + 0.45 * P.amb);
+    if (a <= 0.01) continue;
+    var x = b.x + Math.sin(b.ph) * b.amp, d = b.r * 2.2;
+    ctx.globalAlpha = a;
+    ctx.drawImage(spr.bubble, x - d / 2, b.y - d / 2, d, d);
+  }
+  ctx.globalAlpha = 1;
+}
+function drawParticles() {
+  ctx.globalCompositeOperation = 'lighter';
+  for (var i = 0; i < parts.length; i++) {
+    var p = parts[i];
+    var tw = 0.5 + 0.5 * Math.sin(p.tw);
+    var a = (0.12 + 0.32 * (1 - p.z)) * (0.25 + 0.75 * tw * tw) * (0.6 + 0.4 * P.glow);
+    var d = (1.3 + 2.6 * (1 - p.z)) * S * 6;
+    ctx.globalAlpha = clamp(a, 0, 1);
+    ctx.drawImage(spr.light, p.x - d / 2, p.y - d / 2, d, d);
+  }
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+}
+function zSort(a, b) { return b.z - a.z; }
+function draw() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.drawImage(bgL, 0, 0);
+  drawShafts(false);
+  drawPlants('far');
+  drawList.length = 0;
+  for (var i = 0; i < fishes.length; i++) if (fishes[i].state !== 'away') drawList.push(fishes[i]);
+  drawList.sort(zSort);
+  var k = 0;
+  for (; k < drawList.length && drawList[k].z > 0.55; k++) drawFish(drawList[k]);
+  ctx.drawImage(midL, 0, 0);
+  drawCaustics();
+  drawPlants('mid');
+  for (; k < drawList.length; k++) drawFish(drawList[k]);
+  drawBubbles();
+  drawPlants('near');
+  drawParticles();
+  drawShafts(true);
+  ctx.drawImage(ovL, 0, 0);
+}
+
+/* ================= サイズ ================= */
+function applySize() {
+  var cw = Math.max(1, window.innerWidth || document.documentElement.clientWidth || 1);
+  var ch = Math.max(1, window.innerHeight || document.documentElement.clientHeight || 1);
+  var dpr = window.devicePixelRatio || 1;
+  var k = Math.min(dpr, MAX_LONG / Math.max(cw, ch));
+  var nw = Math.max(1, Math.round(cw * k)), nh = Math.max(1, Math.round(ch * k));
+  if (nw === W && nh === H) return false;
+  var oldW = W, oldH = H;
+  W = nw; H = nh; S = Math.min(W, H) / 1080;
+  canvas.width = W; canvas.height = H;
+  bgL.width = midL.width = ovL.width = W;
+  bgL.height = midL.height = ovL.height = H;
+  layoutScene();
+  layoutParticles(oldW, oldH);
+  renderOverlay();
+  if (oldW) {
+    var all = fishes.concat([anchor]);
+    for (var i = 0; i < all.length; i++) {
+      var f = all[i];
+      f.x = f.x / oldW * W; f.y = f.y / oldH * H;
+      sizeFish(f);
+      if (f.kind === 'cory') f.y = coryY(f);
+    }
+  }
+  return true;
+}
+
+var resizeTimer = 0;
+window.addEventListener('resize', function () {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(function () {
+    if (applySize()) { rebuildAll(); lastBuildReal = performance.now(); }
+  }, 150);
+});
+
+window.__stats = function () {
+  var vis = 0, bub = 0;
+  for (var i = 0; i < fishes.length; i++) if (fishes[i].state !== 'away') vis++;
+  for (i = 0; i < MAX_BUB; i++) if (bubbles[i].on) bub++;
+  return { fish: fishes.length, fishVisible: vis, bubbles: bub, bubblesMax: MAX_BUB, particles: parts.length, plants: bladeCount, simTime: Math.round(simTime * 10) / 10, cycle: Math.round(cyc / CYCLE * 1000) / 1000, width: W, height: H };
+};
+
+/* ================= 開始 ================= */
+applySize();
+spawnAll();
+rebuildAll();
+var last = performance.now();
+lastBuildReal = last;
+function frame(now) {
+  var dt = (now - last) / 1000;
+  last = now;
+  if (!(dt > 0)) dt = 0;
+  if (dt > MAX_DT) dt = MAX_DT;
+  var sdt = dt * SPEED;
+  if (sdt > 0) {
+    var steps = Math.ceil(sdt / STEP);
+    if (steps > MAX_STEPS) steps = MAX_STEPS;
+    var h = sdt / steps;
+    for (var i = 0; i < steps; i++) step(h);
+  }
+  if (simSinceBuild > 4 && now - lastBuildReal > 400) { rebuildAll(); lastBuildReal = now; }
+  draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
