@@ -17,8 +17,8 @@
   canvas {
     position: absolute;
     display: block;
-    image-rendering: pixelated;
     image-rendering: crisp-edges;
+    image-rendering: pixelated;
     cursor: none;
   }
 </style>
@@ -42,7 +42,7 @@
   const MAX_DT = 0.1;           // 1 フレームの実時間の上限（秒）
   const SUB_STEP = 1 / 30;      // シミュレーションの刻み（秒）
   const MAX_SUBSTEPS = 1200;
-  const MAX_BUBBLES = 48;
+  const MAX_BUBBLES = 72;
   const TARGET_SHORT = 180;     // 内部バッファの短辺の目安（px）
   const MAX_LONG = 720;         // 内部バッファの長辺の上限
   const MAX_AREA = 640 * 400;   // 内部バッファの面積の上限
@@ -79,7 +79,7 @@
   const KEYS = [
     { p: 0.00, mul: [0.96, 1.00, 1.02], add: [0, 4, 8],   shaft: 0.50, caus: 0.55 }, // 昼
     { p: 0.22, mul: [0.96, 1.00, 1.02], add: [0, 4, 8],   shaft: 0.50, caus: 0.55 },
-    { p: 0.40, mul: [1.10, 0.86, 0.72], add: [24, 6, 0],  shaft: 0.40, caus: 0.32 }, // 夕方
+    { p: 0.40, mul: [1.08, 0.82, 0.78], add: [24, 2, 8],  shaft: 0.40, caus: 0.32 }, // 夕方
     { p: 0.58, mul: [0.48, 0.58, 0.80], add: [0, 2, 10],  shaft: 0.16, caus: 0.08 }, // 夜
     { p: 0.80, mul: [0.48, 0.58, 0.80], add: [0, 2, 10],  shaft: 0.16, caus: 0.08 },
     { p: 0.92, mul: [0.86, 0.84, 0.94], add: [12, 6, 10], shaft: 0.34, caus: 0.30 }, // 明け方
@@ -245,15 +245,15 @@
       soft: 'l',
       tail: 3,
       rows: [
-        '..........gg......',
-        'g.........ggg.....',
-        'gg....g..ttttt....',
-        '.gg...tttGtttttt..',
-        '..ggttGttttGttett.',
-        '..ggtttGttttGttttt',
-        '.gggwwwwwwwwwwwwtt',
+        '..........kk......',
+        'g.........kkk.....',
+        'gg....k..SSSSS....',
+        '.gk...SSSSSSSSkk..',
+        '..kkSSSSSSSSSkekk.',
+        '..kkSSSSSSSSSSkSSS',
+        '.gkkwwwwwwwwwwwwSS',
         'gg...wwwwwwwwwww.l',
-        'g.......gg..gg.l..'
+        'g.......SS..SS.l..'
       ]
     }
   };
@@ -401,7 +401,7 @@
     const R = mulberry32(20261125 + W * 7 + H * 13);
     const r = (a, b) => a + (b - a) * R();
     const f = Math.max(0.7, Math.min(1.6, W / 320));
-    const sandH = Math.max(16, Math.min(40, Math.round(H * 0.12)));
+    const sandH = Math.max(16, Math.min(40, Math.round(Math.min(H, W) * 0.12)));
     sandBase = H - sandH;
 
     // 砂の上端
@@ -493,7 +493,7 @@
       for (let x = 0; x < W; x++) {
         const dx = (x - cx) / cx, dy = (y - cy) / cy;
         const d = Math.sqrt(dx * dx * 0.8 + dy * dy * 0.9);
-        const v = Math.max(0, (d - 0.78) * 2.6);
+        const v = Math.max(0, (d - 0.84) * 2.2);
         const lvl = Math.floor(v);
         const frac = v - lvl;
         vign[y * W + x] = Math.min(2, lvl + (frac > bayer(x + 3, y + 5) ? 1 : 0));
@@ -501,6 +501,7 @@
     }
 
     buildPlants(R, f);
+    buildOpenSand();
     buildShafts(R);
   }
 
@@ -591,23 +592,23 @@
   }
 
   function makeSource(x, y, bias) {
-    return { x, y, on: false, timer: rr(1, 6) + bias * 10, emit: 0, rate: 0.3 };
+    return { x, y, on: false, timer: rr(3, 25) + bias * 30, emit: 0, rate: 0.5 };
   }
 
   // 水草
   function buildPlants(R, f) {
     plants = [];
     farBlades = [];
-    const waterH = sandBase;
+    const waterH = Math.min(sandBase, 165);   // 縦置きでも草が伸びすぎないように
     const r = (a, b) => a + (b - a) * R();
 
     // 遠景の草（背景を暗くするだけ）
-    const nFar = Math.round(W / 14);
+    const nFar = Math.round(W / 22);
     for (let i = 0; i < nFar; i++) {
       const x = r(0, W);
       farBlades.push({
         x, base: sandTop[Math.min(W - 1, Math.floor(x))] - 4,
-        h: r(0.18, 0.42) * waterH, lean: r(-0.12, 0.12), amp: r(1, 3),
+        h: r(0.14, 0.32) * waterH, lean: r(-0.15, 0.15), amp: r(2, 4), bend: r(-4, 4),
         ph: R() * TAU, w: r(0.25, 0.45)
       });
     }
@@ -621,7 +622,7 @@
       const blades = [];
       for (let k = 0; k < n; k++) {
         blades.push({
-          dx: r(-5, 5), h: r(0.38, 0.72) * waterH, lean: r(-0.18, 0.18),
+          dx: r(-5, 5), h: r(0.32, 0.64) * waterH, lean: r(-0.18, 0.18),
           amp: r(2.5, 6), ph: R() * TAU, w: r(0.35, 0.6), bend: r(-0.3, 0.3)
         });
       }
@@ -661,12 +662,12 @@
     for (let k = 0; k < 6; k++) {
       edgeBlades.push({ dx: r(-6, 8), h: r(0.45, 0.85) * waterH, lean: r(0.0, 0.2), amp: r(3, 7), ph: R() * TAU, w: r(0.25, 0.4), bend: r(0, 0.3) });
     }
-    plants.push({ type: 'ribbon', layer: 'front', x: W * 0.015, base: H + 2, blades: edgeBlades, tone: 1 });
+    plants.push({ type: 'ribbon', layer: 'front', x: W * 0.015, base: sandTop[clampX(W * 0.015)] + 1, blades: edgeBlades, tone: 1 });
     const edgeBlades2 = [];
     for (let k = 0; k < 4; k++) {
       edgeBlades2.push({ dx: r(-6, 4), h: r(0.3, 0.55) * waterH, lean: r(-0.2, 0.0), amp: r(3, 6), ph: R() * TAU, w: r(0.25, 0.4), bend: r(-0.3, 0) });
     }
-    plants.push({ type: 'ribbon', layer: 'front', x: W * 0.985, base: H + 2, blades: edgeBlades2, tone: 1 });
+    plants.push({ type: 'ribbon', layer: 'front', x: W * 0.985, base: sandTop[clampX(W * 0.985)] + 1, blades: edgeBlades2, tone: 1 });
   }
 
   function clampX(x) { return Math.max(0, Math.min(W - 1, Math.round(x))); }
@@ -678,7 +679,7 @@
       shafts.push({
         x: (i + 0.3 + R() * 0.4) / n * W * 1.1 - W * 0.12,
         slope: 0.22 + R() * 0.12,
-        w0: 5 + R() * 9,
+        w0: 7 + R() * 10,
         ph: R() * TAU, w: 0.05 + R() * 0.05,
         ph2: R() * TAU, w2: 0.03 + R() * 0.04,
         amp: 5 + R() * 6
@@ -690,15 +691,20 @@
   // 魚
   // ------------------------------------------------------------------
   const SPECIES = {
-    angel:   { frame: 'angel',   n: 2, speed: 4.2, band: [0.20, 0.60], turnRate: 1 / 70, exitP: 0.35 },
-    gourami: { frame: 'gourami', n: 2, speed: 5.2, band: [0.10, 0.48], turnRate: 1 / 60, exitP: 0.35 },
-    platy:   { frame: 'platy',   n: 4, speed: 7.0, band: [0.15, 0.72], turnRate: 1 / 45, exitP: 0.40 },
-    cory:    { frame: 'cory',    n: 3, speed: 4.5, bottom: true,      turnRate: 0,      exitP: 0.30 },
-    tetra:   { frame: 'tetra',   n: 8, speed: 9.0, band: [0.18, 0.62], turnRate: 1 / 50, exitP: 0.40, school: true }
+    angel:   { frame: 'angel',   n: 2, speed: 4.2, band: [0.20, 0.60], turnRate: 1 / 300, exitP: 0.12 },
+    gourami: { frame: 'gourami', n: 2, speed: 5.2, band: [0.10, 0.48], turnRate: 1 / 300, exitP: 0.12 },
+    platy:   { frame: 'platy',   n: 4, speed: 7.0, band: [0.15, 0.72], turnRate: 1 / 240, exitP: 0.15 },
+    cory:    { frame: 'cory',    n: 3, speed: 4.5, bottom: true,      turnRate: 0,      exitP: 0 },
+    tetra:   { frame: 'tetra',   n: 8, speed: 8.0, band: [0.20, 0.60], turnRate: 1 / 240, exitP: 0, school: true }
   };
+  const MAX_AWAY = 2;   // 同時に画面外へ出ていてよい魚の数
+
+  // 群れの隊形（進行方向に少し長い、ゆるい 3 列）
+  const SCHOOL_SLOTS = [[-30, -9], [-10, -10], [10, -8], [-20, 1], [0, 0], [20, 2], [-12, 10], [8, 9]];
 
   let fishes = [];
   let school = null;
+  let openSand = [];      // 底の魚が休める開けた砂の x
 
   function fishSize(sp) { const fr = FRAMES[sp.frame][1]; return { w: fr.w, h: fr.h }; }
 
@@ -717,43 +723,110 @@
       tailPh: rnd() * 4, sPh: rnd() * TAU, sW: rr(0.05, 0.12),
       yPh1: rnd() * TAU, yW1: rr(0.04, 0.09), yPh2: rnd() * TAU, yW2: rr(0.11, 0.2),
       yHome: rnd(), yHomeT: rr(20, 60),
-      state: 'swim', awayT: 0, edgeDecided: false, exiting: false,
+      xHome: 0.5, xRange: 0.25, swapT: rr(60, 180),
+      state: 'swim', awayT: 0, exiting: false,
       speedMul: rr(0.85, 1.15),
-      rest: 0, move: 0, member: false, ox: 0, oy: 0, oPh: rnd() * TAU, oW: rr(0.1, 0.25),
-      flipHold: 0, turnT: 0, visible: true
+      rest: 0, tx: x, region: [0, 1], crossTo: 0, hover: 0, callT: 0, member: false, ox: 0, oy: 0,
+      oPh: rnd() * TAU, oW: rr(0.08, 0.18), oPh2: rnd() * TAU, oW2: rr(0.1, 0.22),
+      flipHold: 0, turnT: 0
     };
+  }
+
+  // 等間隔の枠を少し揺らして並べ替えた位置（0..1）
+  function spreadSlots(n) {
+    const a = [];
+    for (let i = 0; i < n; i++) a.push((i + 0.5 + rr(-0.3, 0.3)) / n);
+    for (let i = n - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); const t = a[i]; a[i] = a[j]; a[j] = t; }
+    return a;
+  }
+
+  function soloList() {
+    const a = [];
+    for (const f of fishes) if (!f.member && !SPECIES[f.sp].bottom) a.push(f);
+    return a;
+  }
+
+  // 底の魚は砂の手前側（水草や岩の根元より下）を歩く。歩ける x の範囲
+  function buildOpenSand() {
+    openSand = [];
+    for (let x = 14; x < W - 14; x++) openSand.push(x);
+  }
+  // 底の魚の高さ（体の上端が砂の表面より 4px 下＝根元より手前）
+  function coryY(f) {
+    return sandTop[clampX(f.x)] + 10;
+  }
+
+  function pickCoryTarget(f) {
+    const others = fishes.filter(o => o !== f && SPECIES[o.sp].bottom);
+    const free = x => others.every(o => Math.abs(o.tx - x) > 24 && Math.abs(o.x - x) > 20);
+    const reg = f.region;
+    const inRegion = x => x >= reg[0] * W && x <= reg[1] * W;
+    let cand = openSand.filter(x => inRegion(x) && free(x));
+    if (cand.length === 0) cand = openSand.filter(x => inRegion(x));
+    if (cand.length === 0) cand = openSand.slice();
+    if (cand.length === 0) return rr(Math.max(20, reg[0] * W), Math.min(W - 20, reg[1] * W));
+    const near = cand.filter(x => Math.abs(x - f.x) < 70);
+    const pool = (near.length > 0 && rnd() < 0.8) ? near : cand;
+    return pool[Math.floor(rnd() * pool.length)];
   }
 
   function initFish() {
     fishes = [];
-    for (const key of ['angel', 'gourami', 'platy', 'cory']) {
+    // 泳ぐ魚：それぞれに「よく泳ぐ範囲」を画面全体へ均等に割り振る
+    const swimKeys = [];
+    for (const key of ['angel', 'gourami', 'platy']) for (let i = 0; i < SPECIES[key].n; i++) swimKeys.push(key);
+    const xs = spreadSlots(swimKeys.length);
+    const ys = spreadSlots(swimKeys.length);
+    swimKeys.forEach((key, i) => {
       const sp = SPECIES[key];
-      for (let i = 0; i < sp.n; i++) {
-        const dir = rnd() < 0.5 ? -1 : 1;
-        const x = rr(W * 0.15, W * 0.85);
-        let y;
-        const f = newSwimmer(key, x, 0, dir);
-        if (sp.bottom) { y = sandTop[clampX(x)] - f.h / 2 + 3; f.rest = rr(0, 4); }
-        else y = bandY(sp, rnd());
-        f.y = y;
-        if (sp.bottom) f.vx = 0;
-        fishes.push(f);
-      }
+      const f = newSwimmer(key, 0, 0, rnd() < 0.5 ? -1 : 1);
+      f.xHome = 0.12 + 0.76 * xs[i];
+      f.xRange = rr(0.16, 0.28);
+      f.x = W * (f.xHome + rr(-0.6, 0.6) * f.xRange);
+      f.x = Math.max(f.w, Math.min(W - f.w, f.x));
+      f.yHome = ys[i];
+      f.y = bandY(sp, ys[i]);
+      fishes.push(f);
+    });
+    // 底の魚：受け持ちを左半分・右半分に分け（中央線はまたがない）、砂の上から始める
+    const regions = rnd() < 0.5 ? [[0.04, 0.45], [0.55, 0.96], [0.04, 0.45]] : [[0.04, 0.45], [0.55, 0.96], [0.55, 0.96]];
+    for (let i = 0; i < SPECIES.cory.n; i++) {
+      const f = newSwimmer('cory', W * (0.2 + 0.3 * i), 0, rnd() < 0.5 ? -1 : 1);
+      f.region = regions[i % regions.length];
+      fishes.push(f);
+      f.tx = pickCoryTarget(f);
+      f.x = f.tx;
+      f.y = coryY(f);
+      f.rest = rr(2, 10);
+      f.vx = 0;
     }
     // 群れ：見えない中心と、それを追うメンバー
     const sp = SPECIES.tetra;
     const dir = rnd() < 0.5 ? -1 : 1;
-    school = newSwimmer('tetra', rr(W * 0.3, W * 0.7), bandY(sp, rnd()), dir);
-    school.w = 46; school.h = 24;
+    // 群れは左右どちらかの側に住み、数分おきに反対側へ移る
+    school = newSwimmer('tetra', 0, bandY(sp, rr(0.3, 0.7)), dir);
+    school.w = 80; school.h = 26;
+    school.xHome = rnd() < 0.5 ? 0.3 : 0.7; school.xRange = 0.14;
+    school.x = W * school.xHome;
+    school.sideT = rr(90, 200);
     for (let i = 0; i < sp.n; i++) {
-      const ang = (i / sp.n) * TAU + rr(-0.3, 0.3);
-      const rad = rr(5, 16);
       const m = newSwimmer('tetra', 0, 0, dir);
       m.member = true;
-      m.ox = Math.cos(ang) * rad * 1.3;
-      m.oy = Math.sin(ang) * rad * 0.6;
+      m.ox = SCHOOL_SLOTS[i][0] + rr(-3, 3);
+      m.oy = SCHOOL_SLOTS[i][1] + rr(-1.5, 1.5);
       m.x = school.x + m.ox; m.y = school.y + m.oy;
       fishes.push(m);
+    }
+    // 開いた直後から左右どちらかに寄りすぎないように並べ直す
+    for (let k = 0; k < 8; k++) {
+      const c = sideCounts();
+      const total = c.left + c.right;
+      const crowd = c.left > Math.floor(total * 0.6) ? -1 : c.right > Math.floor(total * 0.6) ? 1 : 0;
+      if (crowd === 0) break;
+      const cands = soloList().filter(f => (f.x < W / 2 ? -1 : 1) === crowd);
+      if (cands.length === 0) break;
+      const f = cands[Math.floor(rnd() * cands.length)];
+      f.x = W - f.x; f.xHome = 1 - f.xHome;
     }
   }
 
@@ -761,9 +834,64 @@
     return (f.x - f.w / 2 > W + 1) || (f.x + f.w / 2 < -1);
   }
 
+  function awayCount() {
+    let n = 0;
+    for (const f of fishes) if (!f.member && (f.state === 'away' || f.exiting)) n++;
+    return n;
+  }
+
   function startTurn(f) {
     f.dir = -f.dir;
     f.turning = true;
+    f.crossTo = 0;
+    f.hover = 0;
+  }
+
+  // ある側の「混み具合」を控えめ（多め）に数える：渡っている途中の魚は両側に数える
+  function sideLoad(side, othersOnly) {
+    let n = 0, total = 0;
+    for (const f of fishes) {
+      if (f.state === 'away' || offscreen(f)) continue;
+      if (!f.exiting) total++;           // 画面外へ向かっている魚は、もういないものとして数える
+      if (othersOnly && f.member) continue;
+      const actual = f.x < W / 2 ? -1 : 1;
+      const plan = (f.member ? school : f).crossTo;
+      const nearLine = Math.abs(f.x - W / 2) < (f.member ? 10 : 4);   // 中央線ぎわは両側に数える
+      const home = f.member && (school.xHome < 0.5 ? -1 : 1) === side;   // 群れは行き先（住まい）の側にも数える
+      if (actual === side || plan === side || nearLine || home) n++;
+    }
+    return { n, total };
+  }
+  // plannedCounts は底の魚の行き先選びに使う
+  function plannedCounts() {
+    return { left: sideLoad(-1, false).n, right: sideLoad(1, false).n };
+  }
+  function canEnter(side, n) {
+    const l = sideLoad(side, false);
+    return l.n + n <= Math.floor(l.total * 0.7);
+  }
+  // 1 匹が画面外へ出ても、反対側が 7 割を超えないか
+  function canLeave(f) {
+    const other = (f.x < W / 2 ? -1 : 1) * -1;
+    const l = sideLoad(other, false);
+    return l.n <= Math.floor((l.total - 1) * 0.7);
+  }
+  function canEnterSchool(side) {
+    const l = sideLoad(side, true);
+    return l.n + SPECIES.tetra.n <= Math.floor(l.total * 0.7);
+  }
+  // 群れが渡りたい側にいる魚のうち、中央にいちばん近い 1 匹の範囲を反対側へ移す
+  function callAcross(side) {
+    let best = null, bd = 1e9;
+    for (const f of soloList()) {
+      if (f.state !== 'swim' || f.exiting || f.crossTo) continue;
+      const onSide = (f.x < W / 2 ? -1 : 1) === side;
+      const homeSide = (f.xHome < 0.5 ? -1 : 1) === side;
+      if (!onSide || !homeSide) continue;
+      const d = Math.abs(f.x - W / 2);
+      if (d < bd) { bd = d; best = f; }
+    }
+    if (best) best.xHome = 1 - best.xHome;
   }
 
   // 一般の泳ぎ（中心が x, y）
@@ -771,7 +899,7 @@
     const sp = SPECIES[f.sp];
     if (f.state === 'away') {
       f.awayT -= dt;
-      if (f.awayT <= 0 && (f !== school || schoolAllOff())) reenter(f);
+      if (f.awayT <= 0) reenter(f);
       return;
     }
     f.sPh = wrapPhase(f.sPh + f.sW * dt);
@@ -779,24 +907,65 @@
     f.yPh2 = wrapPhase(f.yPh2 + f.yW2 * dt);
     const spd = sp.speed * f.speedMul * (0.8 + 0.2 * Math.sin(f.sPh));
 
-    // 端の判断
-    const margin = f.w * 0.5 + 8;
-    const ahead = f.dir > 0 ? (f.x > W - margin) : (f.x < margin);
-    if (ahead && !f.turning) {
-      if (!f.edgeDecided) {
-        f.edgeDecided = true;
-        f.exiting = rnd() < sp.exitP;
-        if (!f.exiting) startTurn(f);
-      }
-    } else if (!ahead && !f.exiting) {
-      f.edgeDecided = false;
+    // よく泳ぐ範囲の端で、ゆるく折り返す（画面の端に接する範囲なら、まれに画面外へ）
+    const margin = f.w * 0.5 + 14;
+    let lo = Math.max(margin, (f.xHome - f.xRange) * W);
+    let hi = Math.min(W - margin, (f.xHome + f.xRange) * W);
+    const homeSide = f.xHome < 0.5 ? -1 : 1;
+    if (f === school) {
+      // 群れの範囲は、全員が中央線のこちら側に収まるように
+      if (homeSide < 0) hi = Math.min(hi, W / 2 - 44); else lo = Math.max(lo, W / 2 + 44);
     }
-    // ときどき途中で向きを変える
-    if (!f.turning && !f.exiting && sp.turnRate > 0 && f.x > W * 0.2 && f.x < W * 0.8 && rnd() < sp.turnRate * dt) {
-      startTurn(f);
+    // 画面の中央線を越えるのは、越えた先が混みすぎないときだけ
+    let spdK = 1;
+    if (f === school) {
+      // 群れ：渡れないときは中央で待ち、そのあいだに向こう側の魚を 1 匹ずつこちらへ呼ぶ
+      const lead = (W / 2 - f.x) * f.dir;
+      const moving = (f.x < W / 2 ? -1 : 1) !== homeSide && f.dir === homeSide;   // 反対側へ引っ越し中
+      if (f.crossTo !== 0 && (f.x - 38 * f.crossTo - W / 2) * f.crossTo > 0) f.crossTo = 0;
+      if (moving && !f.turning && f.crossTo === 0 && lead < 40) {
+        if (canEnterSchool(f.dir)) { f.crossTo = f.dir; f.hover = 0; }
+        else if (f.hover <= 0) { f.hover = 40; f.callT = 0; }
+      }
+      if (f.hover > 0 && canEnterSchool(f.dir)) { f.crossTo = f.dir; f.hover = 0; }
+      if (f.hover > 0) {
+        f.hover -= dt;
+        f.callT -= dt;
+        if (f.callT <= 0) { f.callT = 4; callAcross(f.dir); }
+        // 待つ位置：向こう側に空きがある分だけ、群れの先頭をはみ出させる
+        const room = Math.max(0, Math.floor(sideLoad(f.dir, false).total * 0.7) - sideLoad(f.dir, true).n);
+        const fronts = [];
+        for (const m of fishes) if (m.member) fronts.push(m.ox * f.dir);
+        fronts.sort((a, b) => b - a);
+        const waitLead = Math.max(4, room >= fronts.length ? 8 : fronts[room] + 14);   // 中心は中央線を越えない
+        spdK = Math.max(-0.25, Math.min(1, (lead - waitLead) / 30));
+        if (f.hover <= 0) {
+          // 戻っても元の側が混みすぎないなら、あきらめて出直す。混むならもう少し待つ
+          if (sideLoad(-f.dir, true).n + SPECIES.tetra.n <= Math.floor(sideLoad(-f.dir, false).total * 0.7)) {
+            f.xHome = 1 - f.xHome; f.sideT = rr(60, 120);
+          } else f.hover = 10;
+        }
+      }
+    } else if (!f.turning && !f.exiting) {
+      if (f.crossTo !== 0 && (f.x - W / 2) * f.crossTo > 0) f.crossTo = 0;   // 渡りきった
+      const lead = (W / 2 - f.x) * f.dir;
+      if (f.crossTo === 0 && lead > 0 && lead < 18) {
+        if (canEnter(f.dir, 1)) f.crossTo = f.dir;
+        else startTurn(f);   // 手前でゆるく折り返す
+      }
+    }
+    if (!f.turning && !f.exiting && !(f.hover > 0)) {
+      const out = f.dir > 0 ? f.x > hi : f.x < lo;
+      if (out) {
+        const atEdge = f.dir > 0 ? hi >= W - margin - 0.5 : lo <= margin + 0.5;
+        if (atEdge && exitGrace <= 0 && awayCount() < MAX_AWAY && canLeave(f) && rnd() < sp.exitP) f.exiting = true;
+        else startTurn(f);
+      } else if (sp.turnRate > 0 && f.x > lo + 12 && f.x < hi - 12 && rnd() < sp.turnRate * dt) {
+        startTurn(f);   // ときどき途中で向きを変える
+      }
     }
 
-    const desVx = f.dir * spd;
+    const desVx = f.dir * spd * spdK;
     const acc = f.turning ? 0.55 : 0.8;
     f.vx += (desVx - f.vx) * Math.min(1, acc * dt);
 
@@ -831,62 +1000,71 @@
 
     if (f.exiting && offscreen(f)) {
       f.state = 'away';
-      f.awayT = rr(8, 45);
+      f.awayT = rr(4, 10);
       f.exiting = false;
-      f.edgeDecided = false;
       f.turning = false;
-      if (f === school) { f.x = f.dir > 0 ? W + 60 : -60; f.vx = 0; }
     }
   }
 
+  // 戻るときは、魚の少ない側から入る
   function reenter(f) {
     const sp = SPECIES[f.sp];
-    const side = rnd() < 0.5 ? -1 : 1;    // -1: 左から入る
+    const c = sideCounts();
+    const side = c.left === c.right ? (rnd() < 0.5 ? -1 : 1) : (c.left < c.right ? -1 : 1); // -1: 左から入る
     f.dir = -side;
     f.sx = f.dir; f.face = f.dir;
     f.turning = false;
-    const out = f === school ? 60 : f.w / 2 + 2;
-    f.x = side < 0 ? -out : W + out;
+    f.x = side < 0 ? -(f.w / 2 + 2) : W + f.w / 2 + 2;
+    f.xHome = side < 0 ? rr(0.15, 0.4) : rr(0.6, 0.85);
     f.vx = f.dir * sp.speed * f.speedMul;
     f.vy = 0;
-    f.edgeDecided = false;
     f.exiting = false;
     f.state = 'swim';
-    if (sp.bottom) { f.y = sandTop[clampX(f.x)] - f.h / 2 + 3; f.rest = 0; f.move = rr(4, 8); }
-    else { f.yHome = rnd(); f.y = bandY(sp, f.yHome); }
-    if (f === school) {
-      for (const m of fishes) {
-        if (!m.member) continue;
-        m.x = f.x + m.ox - f.dir * 30;
-        m.y = f.y + m.oy;
-        m.vx = f.vx; m.vy = 0;
-        m.dir = f.dir; m.sx = f.dir; m.face = f.dir; m.turnT = 0; m.flipHold = 0;
-      }
-    }
+    f.yHome = rnd(); f.y = bandY(sp, f.yHome);
   }
 
-  function schoolAllOff() {
-    for (const m of fishes) if (m.member && !offscreen(m)) return false;
-    return true;
+  function sideCounts() {
+    let left = 0, right = 0;
+    for (const f of fishes) {
+      if (f.state === 'away' || offscreen(f)) continue;
+      if (f.x < W / 2) left++; else right++;
+    }
+    return { left, right };
+  }
+
+  // 左右どちらかに寄りすぎたら、混んでいる側の魚の「よく泳ぐ範囲」を反対側へ移す
+  function balance(dt) {
+    if (!(school.hover > 0) && school.crossTo === 0) school.sideT -= dt;   // 待ち・渡りの最中は数えない
+    if (school.sideT <= 0) { school.sideT = rr(120, 240); school.xHome = 1 - school.xHome; }
+    for (const f of soloList()) {
+      f.swapT -= dt;
+      if (f.swapT <= 0) {
+        f.swapT = rr(60, 180);
+        const list = soloList();
+        const o = list[Math.floor(rnd() * list.length)];
+        if (o !== f) { const t = f.xHome; f.xHome = o.xHome; o.xHome = t; }
+      }
+    }
   }
 
   // 群れのメンバー
   function updateMember(m, dt, members) {
     const c = school;
     m.oPh = wrapPhase(m.oPh + m.oW * dt);
-    const tx = c.x + m.ox + Math.sin(m.oPh) * 4;
-    const ty = c.y + m.oy + Math.sin(m.oPh * 2 + 1) * 2;
+    m.oPh2 = wrapPhase(m.oPh2 + m.oW2 * dt);
+    // 個体ごとに小さく前後・上下へずれる
+    const tx = c.x + m.ox + Math.sin(m.oPh) * 3.5;
+    const ty = c.y + m.oy + Math.sin(m.oPh2) * 2;
     let ax = (tx - m.x) * 0.35 - m.vx * 0.9 + c.vx * 0.9;
     let ay = (ty - m.y) * 0.35 - m.vy * 1.0 + c.vy * 0.5;
-    // 近すぎる仲間から離れる
+    // 近すぎる仲間から離れる（体長ほどの間隔）
     for (const o of members) {
       if (o === m) continue;
-      const dx = m.x - o.x, dy = m.y - o.y;
-      const d2 = dx * dx + dy * dy * 2.5;
-      if (d2 < 120 && d2 > 0.01) {
-        const d = Math.sqrt(d2);
-        ax += dx / d * (11 - d) * 0.5;
-        ay += dy / d * (11 - d) * 0.3;
+      const nx = (m.x - o.x) / 15, ny = (m.y - o.y) / 8;
+      const q = Math.sqrt(nx * nx + ny * ny);
+      if (q < 1 && q > 0.001) {
+        ax += nx / q * (1 - q) * 10;
+        ay += ny / q * (1 - q) * 6;
       }
     }
     m.vx += ax * dt;
@@ -923,60 +1101,39 @@
     if (m.tailPh >= 4) m.tailPh -= 4 * Math.floor(m.tailPh / 4);
   }
 
-  // 底の魚
+  // 底の魚：開けた砂の上の目的地まで歩き、しばらく休む
   function updateBottom(f, dt) {
     const sp = SPECIES[f.sp];
-    if (f.state === 'away') {
-      f.awayT -= dt;
-      if (f.awayT <= 0) reenter(f);
-      return;
-    }
     if (f.turnT > 0) {
       f.turnT -= dt / 0.9;
       if (f.turnT <= 0) { f.turnT = 0; f.sx = f.dir; }
       else f.sx = f.dir * Math.cos(Math.PI * f.turnT);
     }
-    if (f.move > 0) {
-      f.move -= dt;
-      const des = f.dir * sp.speed * f.speedMul;
-      f.vx += (des - f.vx) * Math.min(1, 1.2 * dt);
-      if (f.move <= 0) f.rest = rr(2, 9);
-    } else {
-      f.vx += (0 - f.vx) * Math.min(1, 1.5 * dt);
+    const dx = f.tx - f.x;
+    if (f.rest > 0) {
       f.rest -= dt;
-      if (f.rest <= 0) {
-        f.move = rr(1.5, 5);
-        // 休んでいる間にときどき向きを変える
-        if (!f.exiting && rnd() < 0.3 && f.turnT === 0) { f.dir = -f.dir; f.turnT = 1; }
+      f.vx += (0 - f.vx) * Math.min(1, 1.5 * dt);
+      if (f.rest <= 0) f.tx = pickCoryTarget(f);
+    } else if (Math.abs(dx) < 1.5) {
+      f.rest = rr(6, 16);
+    } else {
+      const want = dx > 0 ? 1 : -1;
+      if (want !== f.dir && f.turnT === 0) { f.dir = want; f.turnT = 1; }
+      if (f.turnT > 0) {
+        f.vx += (0 - f.vx) * Math.min(1, 1.5 * dt);
+      } else {
+        const des = f.dir * sp.speed * f.speedMul * Math.min(1, Math.abs(dx) / 6 + 0.25);
+        f.vx += (des - f.vx) * Math.min(1, 1.2 * dt);
       }
     }
-    // 端
-    const margin = f.w * 0.5 + 6;
-    const ahead = f.dir > 0 ? (f.x > W - margin) : (f.x < margin);
-    if (ahead && f.turnT === 0) {
-      if (!f.edgeDecided) {
-        f.edgeDecided = true;
-        f.exiting = rnd() < sp.exitP;
-        if (!f.exiting) { f.dir = -f.dir; f.turnT = 1; f.move = 0; f.rest = rr(0.5, 2); }
-      }
-    } else if (!ahead && !f.exiting) f.edgeDecided = false;
-    if (f.exiting && f.move <= 0 && f.rest > 0) f.rest = Math.min(f.rest, 0.3);
-
     f.x += f.vx * dt;
-    const ty = sandTop[clampX(f.x)] - f.h / 2 + 3;
+    f.x = Math.max(f.w / 2, Math.min(W - f.w / 2, f.x));
+    const ty = coryY(f);
     f.y += (ty - f.y) * Math.min(1, 2 * dt);
     if (f.turnT === 0) f.sx = f.dir;
     f.face = f.sx < 0 ? -1 : 1;
     f.tailPh += dt * (0.8 + Math.abs(f.vx) * 0.6);
     if (f.tailPh >= 4) f.tailPh -= 4 * Math.floor(f.tailPh / 4);
-
-    if (f.exiting && offscreen(f)) {
-      f.state = 'away';
-      f.awayT = rr(15, 60);
-      f.exiting = false;
-      f.edgeDecided = false;
-      f.vx = 0;
-    }
   }
 
   // ------------------------------------------------------------------
@@ -990,15 +1147,15 @@
       s.timer -= dt;
       if (s.timer <= 0) {
         s.on = !s.on;
-        s.timer = s.on ? rr(4, 11) : rr(6, 22);
-        s.rate = rr(0.18, 0.45);
+        s.timer = s.on ? rr(3, 7) : rr(16, 40);
+        s.rate = rr(0.35, 0.75);
       }
       if (s.on) {
         s.emit -= dt;
         if (s.emit <= 0) {
           s.emit = s.rate * rr(0.6, 1.4);
           if (bubbles.length < MAX_BUBBLES) {
-            bubbles.push({ x: s.x + rr(-0.6, 0.6), y: s.y, vy: -rr(5, 8), size: rnd() < 0.7 ? 0 : 1, ph: rnd() * TAU, wob: rr(0.3, 0.9), grow: rr(0.35, 0.6) });
+            bubbles.push({ x: s.x + rr(-0.6, 0.6), y: s.y, vy: -rr(5, 8), size: 0, maxSize: rnd() < 0.15 ? 2 : 1, ph: rnd() * TAU, wob: rr(0.3, 0.9), grow: rr(0.35, 0.6) });
           }
         }
       }
@@ -1010,7 +1167,7 @@
       b.ph = wrapPhase(b.ph + 3 * dt);
       b.x += Math.sin(b.ph) * b.wob * dt * 3;
       const depthFrac = b.y / Math.max(1, sandBase);
-      if (b.size < 2 && depthFrac < b.grow) { b.size++; b.grow *= 0.45; }
+      if (b.size < b.maxSize && depthFrac < b.grow) { b.size++; b.grow *= 0.45; }
       if (b.y < 6 || b.x < -4 || b.x > W + 4 || !isFinite(b.y)) {
         bubbles[i] = bubbles[bubbles.length - 1];
         bubbles.pop();
@@ -1053,8 +1210,10 @@
   let dayPhase = 0.04;   // 0..1
   let surfPh1 = 0, surfPh2 = 0, causPh1 = 0, causPh2 = 0, causPh3 = 0;
   let simSeconds = 0;
+  let exitGrace = 120;   // 開いてしばらくは画面外へ抜けない
 
   function step(dt) {
+    if (exitGrace > 0) exitGrace -= dt;
     dayPhase += dt / DAY_PERIOD;
     if (dayPhase >= 1) dayPhase -= Math.floor(dayPhase);
     simSeconds += dt;
@@ -1087,6 +1246,27 @@
         f.x = -100; f.y = sandBase * 0.5; f.vx = 0; f.vy = 0; f.state = 'away'; f.awayT = 5;
       }
     }
+    // 泳ぐ魚どうし（群れを含む）が重なりすぎないよう、上下にそっと離す
+    const solo = [school];
+    for (const f of fishes) if (!f.member && !SPECIES[f.sp].bottom) solo.push(f);
+    for (let i = 0; i < solo.length; i++) {
+      const a = solo[i];
+      if (a.state === 'away') continue;
+      for (let j = i + 1; j < solo.length; j++) {
+        const b = solo[j];
+        if (b.state === 'away') continue;
+        const ox = (a.w + b.w) * 0.5 - Math.abs(a.x - b.x);
+        const oy = (a.h + b.h) * 0.55 - Math.abs(a.y - b.y);
+        if (ox > 0 && oy > 0) {
+          const s = a.y < b.y ? -1 : 1;
+          const push = Math.min(oy, 6) * 0.6 * dt;
+          a.y += s * push; b.y -= s * push;
+          a.yHome = Math.max(0, Math.min(1, a.yHome + s * 0.08 * dt));
+          b.yHome = Math.max(0, Math.min(1, b.yHome - s * 0.08 * dt));
+        }
+      }
+    }
+    balance(dt);
     updateBubbles(dt);
     updateParticles(dt);
   }
@@ -1180,7 +1360,7 @@
       const sway = Math.sin(b.ph) * b.amp;
       for (let j = 0; j < b.h; j++) {
         const t = j / b.h;
-        const x = Math.round(b.x + b.lean * j + sway * t * t);
+        const x = Math.round(b.x + b.lean * j + (sway + b.bend) * t * t);
         const y = Math.round(b.base - j);
         if (x < 0 || x >= W || y < 0 || y >= H) continue;
         const i = y * W + x;
@@ -1235,7 +1415,7 @@
         for (let x = xa; x <= xb; x++) {
           const e = 1 - Math.abs(x - cxp) / half;
           if (e <= 0) continue;
-          if (strength * Math.min(1, e * 1.6) > bayer(x, y)) {
+          if (strength * Math.min(1, e * 2.6) > bayer(x, y)) {
             const i = y * W + x;
             buf[i] = LIGHTEN[buf[i]];
           }
@@ -1257,14 +1437,29 @@
       for (const s of p.stems) drawStem(p, s, Math.sin(s.ph) * s.amp + swayGlobal);
     }
 
-    // 魚（大きい魚を奥に）
-    const order = ['angel', 'gourami', 'tetra', 'platy', 'cory'];
+    // 泡（魚より奥）
+    for (const b of bubbles) {
+      const x = Math.round(b.x), y = Math.round(b.y);
+      if (b.size === 0) { px(x, y, 7); }
+      else if (b.size === 1) { px(x, y, 8); px(x + 1, y, 7); px(x, y + 1, 7); remap(x + 1, y + 1, LIGHTEN); }
+      else {
+        // 小さな輪（3x3）
+        px(x, y - 1, 7); px(x - 1, y, 7); px(x + 1, y, 7); px(x, y + 1, 7);
+        remap(x, y, LIGHTEN);
+      }
+    }
+
+    // 泳ぐ魚（大きい魚を奥に）
+    const drawFish = f => {
+      const frames = FRAMES[SPECIES[f.sp].frame];
+      const fr = frames[TAIL_SEQ[Math.floor(f.tailPh) & 3]];
+      drawSprite(fr, f.x, f.y, f.sx);
+    };
+    const order = ['angel', 'gourami', 'tetra', 'platy'];
     for (const key of order) {
       for (const f of fishes) {
         if (f.sp !== key || f.state === 'away') continue;
-        const frames = FRAMES[SPECIES[f.sp].frame];
-        const fr = frames[TAIL_SEQ[Math.floor(f.tailPh) & 3]];
-        drawSprite(fr, f.x, f.y, f.sx);
+        drawFish(f);
       }
     }
 
@@ -1274,19 +1469,8 @@
       for (const b of p.blades) drawRibbon(p, b, Math.sin(b.ph) * b.amp + swayGlobal);
     }
 
-    // 泡
-    for (const b of bubbles) {
-      const x = Math.round(b.x), y = Math.round(b.y);
-      if (b.size === 0) { px(x, y, 7); }
-      else if (b.size === 1) { px(x, y, 8); px(x + 1, y, 7); px(x, y + 1, 7); remap(x + 1, y + 1, LIGHTEN); }
-      else {
-        px(x, y - 1, 7); px(x + 1, y - 1, 7);
-        px(x - 1, y, 7); px(x + 2, y, 7);
-        px(x - 1, y + 1, 7); px(x + 2, y + 1, 7);
-        px(x, y + 2, 7); px(x + 1, y + 2, 7);
-        px(x, y, 8); remap(x + 1, y + 1, LIGHTEN);
-      }
-    }
+    // 底の魚（底の造形より手前）
+    for (const f of fishes) if (SPECIES[f.sp].bottom) drawFish(f);
 
     // 手前の粒
     for (const p of particles) {
@@ -1351,8 +1535,8 @@
     } else {
       const kx = W / oldW, ky = H / oldH;
       const all = fishes.concat([school]);
-      for (const f of all) { f.x *= kx; f.y *= ky; }
-      for (const f of fishes) if (SPECIES[f.sp].bottom) f.y = sandTop[clampX(f.x)] - f.h / 2 + 3;
+      for (const f of all) { f.x *= kx; f.y *= ky; f.tx *= kx; }
+      for (const f of fishes) if (SPECIES[f.sp].bottom) f.y = coryY(f);
     }
     bubbles.length = 0;
     initParticles();
@@ -1380,11 +1564,12 @@
   }
 
   window.__stats = function () {
-    let visible = 0;
-    for (const f of fishes) if (f.state !== 'away' && !offscreen(f)) visible++;
+    const c = sideCounts();
     return {
       fish: fishes.length,
-      visible,
+      visible: c.left + c.right,
+      left: c.left,
+      right: c.right,
       bubbles: bubbles.length,
       particles: particles.length,
       plants: plants.length,
