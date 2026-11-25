@@ -1,0 +1,982 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>水槽</title>
+<style>
+html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#26394a;cursor:none}
+canvas{display:block;position:fixed;left:0;top:0;width:100vw;height:100vh;cursor:none}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+(function () {
+'use strict';
+
+/* ===== 基本 ===== */
+var TAU = Math.PI * 2;
+var qs = new URLSearchParams(location.search);
+var SPEED = parseFloat(qs.get('speed'));
+if (!(SPEED > 0) || !isFinite(SPEED)) SPEED = 1;
+SPEED = Math.min(SPEED, 300);
+var MAXLONG = 1920;          // 内部描画の長辺上限
+var STEP = 1 / 30;           // シミュレーションの最大刻み
+var MAXSTEPS = 600;
+
+var cv = document.getElementById('c');
+var ctx = cv.getContext('2d', { alpha: false });
+var W = 1, H = 1, U = 1, surfY = 0, floorY = 0, D = 1;
+
+var rand = Math.random;
+function rr(a, b) { return a + (b - a) * rand(); }
+function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+function wrap(p) { return (p >= TAU || p < 0) ? ((p % TAU) + TAU) % TAU : p; }
+function seeded(s) {
+  return function () {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    var t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+/* ===== 色 ===== */
+function hx(h) { var n = parseInt(h.slice(1), 16); return [n >> 16 & 255, n >> 8 & 255, n & 255]; }
+function mx(a, b, t) { return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]; }
+function css(c) { return 'rgb(' + (c[0] | 0) + ',' + (c[1] | 0) + ',' + (c[2] | 0) + ')'; }
+
+// 基本の 12 色（くすんだ中間色）。他はこの中どうしの混色。
+var BASE = {
+  ink: '#26394a', deep: '#2f5d62', teal: '#3f7f7a', sea: '#5e9c8f',
+  sage: '#93b4a2', sand: '#d8c59f', sandD: '#b39b72', cream: '#eee2c6',
+  coral: '#d9826b', rust: '#a5573f', mustard: '#d4a64a', slate: '#5a6e72'
+};
+var PAL = {}, pid = 0;
+function addC(name, rgb) { PAL[name] = { id: pid++, rgb: rgb }; }
+for (var k in BASE) addC(k, hx(BASE[k]));
+function R(k) { return PAL[k].rgb; }
+addC('coralL', mx(R('coral'), R('cream'), 0.45));
+addC('mustL', mx(R('mustard'), R('cream'), 0.45));
+addC('sandL', mx(R('sand'), R('cream'), 0.5));
+addC('sandM', mx(R('sand'), R('sandD'), 0.5));
+addC('seaD', mx(R('sea'), R('deep'), 0.55));
+addC('slateL', mx(R('slate'), R('sage'), 0.55));
+addC('olive', mx(R('mustard'), R('deep'), 0.55));
+addC('wood', mx(mx(R('rust'), R('sandD'), 0.45), R('ink'), 0.35));
+addC('woodL', mx(R('rust'), R('sandD'), 0.6));
+addC('spot', mx(R('sandD'), R('ink'), 0.65));
+addC('stone', mx(R('sandD'), R('slate'), 0.5));
+addC('stoneL', mx(R('sand'), R('slate'), 0.3));
+addC('creamD', mx(R('cream'), R('sandD'), 0.35));
+addC('corySk', mx(R('slate'), R('sandD'), 0.35));
+addC('coryBk', mx(R('ink'), R('slate'), 0.4));
+
+// 時刻のキー（周期 20 分。0 と 1 は同じ値）
+function key(o) { var r = {}; for (var k in o) r[k] = typeof o[k] === 'string' ? hx(o[k]) : o[k]; return r; }
+var K_DAY   = key({ top: '#a3c8be', bot: '#4f8682', fog: '#7aa9a1', tint: '#ffffff', ta: 0.0,  ray: '#f5efda', ra: 0.15, shade: '#1f3942' });
+var K_DUSK  = key({ top: '#dfb08e', bot: '#5e6874', fog: '#a28e88', tint: '#e8875a', ta: 0.16, ray: '#f8d6aa', ra: 0.16, shade: '#382c38' });
+var K_NIGHT = key({ top: '#34516a', bot: '#17263a', fog: '#2a4058', tint: '#1a2c4e', ta: 0.48, ray: '#a7c0d4', ra: 0.06, shade: '#0d1726' });
+var K_DAWN  = key({ top: '#a0b6bf', bot: '#3f5e6e', fog: '#7690a0', tint: '#a2b5d6', ta: 0.12, ray: '#ebe8dc', ra: 0.10, shade: '#1b2f3e' });
+var KEYS = [[0, K_DAY], [0.22, K_DAY], [0.38, K_DUSK], [0.52, K_NIGHT], [0.74, K_NIGHT], [0.87, K_DAWN], [1, K_DAY]];
+var CYCLE = 1200; // 秒
+var dayPh = 0;    // 0..1 で折り返し
+var env = {};
+function computeEnv() {
+  var i = 0;
+  while (i < KEYS.length - 2 && dayPh >= KEYS[i + 1][0]) i++;
+  var a = KEYS[i], b = KEYS[i + 1];
+  var t = (dayPh - a[0]) / Math.max(1e-6, b[0] - a[0]);
+  t = clamp(t, 0, 1); t = t * t * (3 - 2 * t);
+  for (var k in a[1]) {
+    var va = a[1][k], vb = b[1][k];
+    env[k] = typeof va === 'number' ? va + (vb - va) * t : mx(va, vb, t);
+  }
+  env.fog = mx(env.top, env.bot, 0.74); // 奥の物は、その高さの水の色へ溶ける
+  env.farC = css(mx(mx(env.top, env.bot, 0.9), env.shade, 0.2));
+  env.farH = css(mx(mx(env.top, env.bot, 0.8), env.shade, 0.1));
+}
+var cache = new Map();
+function C(name, fog, shade) {
+  var p = PAL[name];
+  shade = shade || 0;
+  var key = p.id * 1000000 + Math.round(fog * 200) * 1000 + Math.round(shade * 200);
+  var s = cache.get(key);
+  if (s) return s;
+  var c = mx(p.rgb, env.tint, env.ta);
+  c = mx(c, env.fog, fog);
+  if (shade) c = mx(c, env.shade, shade);
+  s = css(c); cache.set(key, s); return s;
+}
+
+/* ===== 層 ===== */
+var LAYERS = [
+  { fog: 0.56, shade: 0, f: 0.075, amp: 14 },  // 0 遠景の岩
+  { fog: 0.44, shade: 0, f: 0.085, amp: 16 },  // 1 奥の水草
+  { fog: 0.10, shade: 0, f: 0.105, amp: 20 },  // 2 中景
+  { fog: 0.00, shade: 0.34, f: 0.13, amp: 24 } // 3 手前
+];
+
+/* ===== 砂の形 ===== */
+function sandY(x) { var u = x / W; return floorY + Math.sin(u * TAU * 1.1 + 0.7) * 12 * U + Math.sin(u * TAU * 2.7 + 2.1) * 6 * U; }
+function backY(x) { var u = x / W; return floorY - 30 * U + Math.sin(u * TAU * 1.6 + 1.3) * 14 * U + Math.sin(u * TAU * 3.4 + 0.4) * 6 * U; }
+function lipY(x) { var u = x / W; return H - 34 * U + Math.sin(u * TAU * 2.2 + 0.3) * 9 * U + Math.sin(u * TAU * 5.1 + 1.7) * 4 * U; }
+
+/* ===== 汎用パス ===== */
+function smoothArr(a, n) { // a: 平坦配列, n: 要素数(座標数*2)
+  var m = n / 2;
+  ctx.moveTo(a[0], a[1]);
+  for (var i = 1; i < m - 1; i++) {
+    var x = a[2 * i], y = a[2 * i + 1];
+    ctx.quadraticCurveTo(x, y, (x + a[2 * i + 2]) / 2, (y + a[2 * i + 3]) / 2);
+  }
+  ctx.lineTo(a[2 * m - 2], a[2 * m - 1]);
+}
+function closedSmooth(pts) {
+  var p = new Path2D(), n = pts.length / 2;
+  function mxp(i) { return (pts[2 * (i % n)] + pts[2 * ((i + 1) % n)]) / 2; }
+  function myp(i) { return (pts[2 * (i % n) + 1] + pts[2 * ((i + 1) % n) + 1]) / 2; }
+  p.moveTo(mxp(0), myp(0));
+  for (var i = 1; i <= n; i++) p.quadraticCurveTo(pts[2 * (i % n)], pts[2 * (i % n) + 1], mxp(i), myp(i));
+  p.closePath();
+  return p;
+}
+function blobPts(rng, rx, ry, n, jit) {
+  var pts = [];
+  for (var i = 0; i < n; i++) {
+    var a = i / n * TAU, r = 1 + (rng() * 2 - 1) * jit;
+    var x = Math.cos(a) * rx * r, y = -ry + Math.sin(a) * ry * r;
+    if (y > ry * 0.12) y = ry * 0.12;
+    pts.push(x, y);
+  }
+  return pts;
+}
+function leafPath(x0, y0, cx, cy, x1, y1, w) {
+  var dx = x1 - x0, dy = y1 - y0, l = Math.hypot(dx, dy) || 1;
+  var nx = -dy / l * w, ny = dx / l * w;
+  ctx.moveTo(x0, y0);
+  ctx.quadraticCurveTo(cx + nx, cy + ny, x1, y1);
+  ctx.quadraticCurveTo(cx - nx, cy - ny, x0, y0);
+}
+
+/* ===== レイアウト ===== */
+var farRocks = [], plants = [[], [], [], []], midRocks = [], frontRocks = [], woods = [], pebbles = [], ripples = [];
+var emitters = [], rays = [];
+var woodPath = null, woodHi = null, woodShadow = null;
+
+function makeRock(rng, x, rx, ry, layer, c, ch, moss) {
+  var pts = blobPts(rng, rx, ry, 9, 0.14);
+  var hp = [];
+  for (var i = 0; i < pts.length; i += 2) hp.push(pts[i] * 0.8 - rx * 0.16, pts[i + 1] * 0.78 - ry * 0.3);
+  var r = { x: x, rx: rx, ry: ry, layer: layer, c: c, ch: ch, path: closedSmooth(pts), hi: closedSmooth(hp), moss: null };
+  if (moss) {
+    var mp = [];
+    for (var j = 0; j < 7; j++) {
+      var a = j / 7 * TAU, rad = 1 + (rng() * 2 - 1) * 0.25;
+      mp.push(Math.cos(a) * rx * 0.45 * rad + rx * 0.1, -ry * 2 + Math.sin(a) * ry * 0.35 * rad);
+    }
+    r.moss = closedSmooth(mp);
+  }
+  return r;
+}
+
+function strip(path, x0, y0, cx, cy, x1, y1, w0, w1) {
+  var n = 22, Lp = [], Rp = [];
+  for (var i = 0; i <= n; i++) {
+    var t = i / n, it = 1 - t;
+    var x = it * it * x0 + 2 * it * t * cx + t * t * x1;
+    var y = it * it * y0 + 2 * it * t * cy + t * t * y1;
+    var dx = 2 * it * (cx - x0) + 2 * t * (x1 - cx), dy = 2 * it * (cy - y0) + 2 * t * (y1 - cy);
+    var l = Math.hypot(dx, dy) || 1, nx = -dy / l, ny = dx / l;
+    var w = (w0 + (w1 - w0) * t) / 2;
+    Lp.push(x + nx * w, y + ny * w); Rp.push(x - nx * w, y - ny * w);
+  }
+  path.moveTo(Lp[0], Lp[1]);
+  for (var a = 2; a < Lp.length; a += 2) path.lineTo(Lp[a], Lp[a + 1]);
+  var ex = (Lp[Lp.length - 2] + Rp[Rp.length - 2]) / 2, ey = (Lp[Lp.length - 1] + Rp[Rp.length - 1]) / 2;
+  var tx = x1 - cx, ty = y1 - cy, tl = Math.hypot(tx, ty) || 1;
+  path.quadraticCurveTo(ex + tx / tl * w1 * 0.7, ey + ty / tl * w1 * 0.7, Rp[Rp.length - 2], Rp[Rp.length - 1]);
+  for (var b = Rp.length - 4; b >= 0; b -= 2) path.lineTo(Rp[b], Rp[b + 1]);
+  path.closePath();
+}
+function quadPt(x0, y0, cx, cy, x1, y1, t) {
+  var it = 1 - t;
+  return [it * it * x0 + 2 * it * t * cx + t * t * x1, it * it * y0 + 2 * it * t * cy + t * t * y1];
+}
+
+function bladeGroup(rng, layer, x, n, hMin, hMax, w, cols, spread) {
+  var items = [];
+  for (var i = 0; i < n; i++) {
+    items.push({ dx: (rng() * 2 - 1) * spread * U, h: hMin + rng() * (hMax - hMin), w: w * (0.8 + rng() * 0.4) * U,
+      lean: (rng() * 2 - 1) * 0.22, po: rng() * TAU, c: cols[i % cols.length] });
+  }
+  items.sort(function (a, b) { return b.h - a.h; });
+  return { t: 'b', layer: layer, x: x, items: items, ph: rng() * TAU, f: LAYERS[layer].f * (0.9 + rng() * 0.2), amp: LAYERS[layer].amp };
+}
+function stemGroup(rng, layer, x, n, hMin, hMax, stemC, leafCs, leafLen, spread) {
+  var items = [];
+  for (var i = 0; i < n; i++) {
+    var h = hMin + rng() * (hMax - hMin);
+    items.push({ dx: (rng() * 2 - 1) * spread * U, h: h, lean: (rng() * 2 - 1) * 0.12, po: rng() * TAU,
+      nodes: Math.max(4, Math.round(h / (34 * U))), ll: leafLen * (0.85 + rng() * 0.3) * U });
+  }
+  return { t: 's', layer: layer, x: x, items: items, sc: stemC, lc: leafCs, ph: rng() * TAU, f: LAYERS[layer].f * (0.9 + rng() * 0.2), amp: LAYERS[layer].amp * 0.7 };
+}
+function swordGroup(rng, layer, x, y, n, lMin, lMax, wr, cols, vein, aMin, aMax) {
+  var items = [];
+  for (var i = 0; i < n; i++) {
+    var a = aMin + (aMax - aMin) * (n === 1 ? 0.5 : i / (n - 1)) + (rng() * 2 - 1) * 0.08;
+    var l = (lMin + rng() * (lMax - lMin)) * U * (1 - Math.abs(a) * 0.25);
+    items.push({ a: a, l: l, w: l * wr, po: rng() * TAU, c: cols[i % cols.length] });
+  }
+  items.sort(function (p, q) { return Math.abs(q.a) - Math.abs(p.a); });
+  return { t: 'w', layer: layer, x: x, y: y, items: items, vein: vein, ph: rng() * TAU, f: LAYERS[layer].f * (0.9 + rng() * 0.2), amp: LAYERS[layer].amp };
+}
+
+function build() {
+  var rng = seeded(20261125);
+  var sW = clamp(W / (1920 * U), 0.6, 1.4);
+  farRocks = []; plants = [[], [], [], []]; midRocks = []; frontRocks = []; pebbles = []; ripples = []; emitters = []; rays = [];
+
+  // 遠景の岩影
+  [[0.04, 250, 150], [0.3, 300, 110], [0.57, 230, 170], [0.86, 320, 130], [1.02, 200, 100]].forEach(function (d) {
+    farRocks.push(makeRock(rng, d[0] * W, d[1] * U * sW, d[2] * U, 0, 'deep', 'teal', false));
+  });
+  // 奥の水草
+  [0.18, 0.49, 0.79].forEach(function (u) {
+    plants[1].push(bladeGroup(rng, 1, u * W, 7, D * 0.5, D * 0.82, 15, ['sea', 'teal'], 40));
+  });
+  [0.03, 0.63, 0.95].forEach(function (u) {
+    plants[1].push(stemGroup(rng, 1, u * W, 4, D * 0.35, D * 0.6, 'teal', ['sage', 'sea'], 30, 30));
+  });
+  // 中景
+  plants[2].push(bladeGroup(rng, 2, 0.075 * W, 9, D * 0.42, D * 0.7, 17, ['sea', 'seaD'], 46));
+  plants[2].push(swordGroup(rng, 2, 0.665 * W, 0, 8, 170, 250, 0.26, ['sea', 'teal'], 'sage', -1.15, 1.15));
+  plants[2].push(stemGroup(rng, 2, 0.875 * W, 5, D * 0.32, D * 0.55, 'rust', ['coral', 'coralL'], 34, 42));
+  plants[2].push(stemGroup(rng, 2, 0.43 * W, 3, D * 0.22, D * 0.36, 'olive', ['olive', 'sage'], 30, 22));
+  plants[2].push(swordGroup(rng, 2, 0.53 * W, 0, 6, 80, 120, 0.3, ['olive', 'sea'], 'mustL', -1.2, 1.2));
+
+  // 中景の岩
+  midRocks.push(makeRock(rng, 0.62 * W, 120 * U, 78 * U, 2, 'stone', 'stoneL', true));
+  midRocks.push(makeRock(rng, 0.705 * W, 85 * U, 112 * U, 2, 'slate', 'slateL', false));
+  midRocks.push(makeRock(rng, 0.765 * W, 64 * U, 42 * U, 2, 'stone', 'stoneL', false));
+  midRocks.push(makeRock(rng, 0.25 * W, 46 * U, 28 * U, 2, 'slate', 'slateL', false));
+
+  // 流木
+  woodPath = new Path2D(); woodHi = new Path2D(); woodShadow = new Path2D();
+  var x0 = 0.1 * W, y0 = sandY(0.1 * W) + 14 * U;
+  var tc = [0.22 * W, floorY - 46 * U], te = [0.37 * W, floorY - D * 0.27];
+  strip(woodPath, x0, y0, tc[0], tc[1], te[0], te[1], 84 * U, 30 * U);
+  strip(woodShadow, x0, y0, tc[0], tc[1], te[0], te[1], 84 * U, 30 * U);
+  var b1 = quadPt(x0, y0, tc[0], tc[1], te[0], te[1], 0.45);
+  var b1e = [0.155 * W, floorY - D * 0.37], b1c = [b1[0] - 0.008 * W, b1[1] - D * 0.13];
+  strip(woodPath, b1[0], b1[1], b1c[0], b1c[1], b1e[0], b1e[1], 38 * U, 10 * U);
+  strip(woodShadow, b1[0], b1[1], b1c[0], b1c[1], b1e[0], b1e[1], 38 * U, 10 * U);
+  var b2 = quadPt(x0, y0, tc[0], tc[1], te[0], te[1], 0.78);
+  strip(woodPath, b2[0], b2[1], b2[0] + 0.05 * W, b2[1] - D * 0.05, 0.455 * W, floorY - D * 0.37, 26 * U, 8 * U);
+  strip(woodPath, x0 + 10 * U, y0 - 6 * U, x0 - 0.03 * W, y0 - 26 * U, x0 - 0.065 * W, y0 + 4 * U, 52 * U, 14 * U);
+  strip(woodPath, x0 + 30 * U, y0, x0 + 0.03 * W, y0 + 4 * U, x0 + 0.06 * W, y0 + 26 * U, 34 * U, 10 * U);
+  strip(woodHi, x0 + 8 * U, y0 - 24 * U, tc[0], tc[1] - 22 * U, te[0] - 4 * U, te[1] - 8 * U, 22 * U, 8 * U);
+  strip(woodHi, b1[0] - 8 * U, b1[1] - 10 * U, b1c[0] - 8 * U, b1c[1], b1e[0] - 3 * U, b1e[1], 10 * U, 3 * U);
+  strip(woodHi, x0 - 4 * U, y0 - 22 * U, x0 - 0.03 * W, y0 - 38 * U, x0 - 0.06 * W, y0 - 6 * U, 14 * U, 4 * U);
+
+  // 砂のもよう
+  for (var i = 0; i < 46; i++) {
+    var px = rng() * W, py = sandY(px) + 10 * U + rng() * (H - sandY(px) - 50 * U);
+    var cols = ['sandD', 'stone', 'stoneL', 'creamD', 'slate', 'sandM'];
+    pebbles.push({ x: px, y: py, rx: (4 + rng() * 9) * U, ry: (3 + rng() * 5) * U, c: cols[(rng() * cols.length) | 0], a: (rng() - 0.5) * 0.6 });
+  }
+  for (var j = 0; j < 14; j++) {
+    var qx = rng() * W, qy = sandY(qx) + 16 * U + rng() * (H - sandY(qx) - 60 * U);
+    ripples.push({ x: qx, y: qy, w: (40 + rng() * 90) * U, h: (2 + rng() * 2.5) * U });
+  }
+
+  // 手前
+  plants[3].push(swordGroup(rng, 3, -0.01 * W, H + 30 * U, 7, 300, 400, 0.24, ['deep', 'seaD'], 'teal', -0.15, 1.25));
+  plants[3].push(bladeGroup(rng, 3, 0.885 * W, 7, D * 0.26, D * 0.44, 19, ['seaD', 'deep'], 40));
+  frontRocks.push(makeRock(rng, 0.985 * W, 170 * U, 100 * U, 3, 'slate', 'slateL', true));
+  frontRocks.push(makeRock(rng, 0.905 * W, 70 * U, 42 * U, 3, 'stone', 'stoneL', false));
+
+  // 泡の出どころ
+  emitters.push({ x: 0.585 * W, active: true, t: rr(6, 12), sp: 0 });
+  emitters.push({ x: 0.465 * W, active: false, t: rr(8, 20), sp: 0 });
+
+  // 光の筋
+  [-0.08, 0.14, 0.34, 0.55, 0.76].forEach(function (u) {
+    rays.push({ u: u + (rng() - 0.5) * 0.05, w: (45 + rng() * 70) * U, ph: rng() * TAU, f: 0.02 + rng() * 0.02, ph2: rng() * TAU, f2: 0.03 + rng() * 0.03 });
+  });
+}
+
+/* ===== 魚 ===== */
+var bA = 0, bP = 0, bK = 0;
+function by(x, y) {
+  var s = 0.5 - x, s2 = s > 0.12 ? s - 0.12 : 0;
+  return y + bA * s2 * s2 * Math.sin(bP - bK * s);
+}
+function M(x, y) { ctx.moveTo(x, by(x, y)); }
+function L(x, y) { ctx.lineTo(x, by(x, y)); }
+function Q(cx, cy, x, y) { ctx.quadraticCurveTo(cx, by(cx, cy), x, by(x, y)); }
+function B(a, b, c, d, x, y) { ctx.bezierCurveTo(a, by(a, b), c, by(c, d), x, by(x, y)); }
+function E(x, y, r) { var yy = by(x, y); ctx.moveTo(x + r, yy); ctx.arc(x, yy, r, 0, TAU); }
+function fillP(col, fn) { ctx.fillStyle = col; ctx.beginPath(); fn(); ctx.fill(); }
+function clipDraw(fn, inner) { ctx.save(); ctx.beginPath(); fn(); ctx.clip(); inner(); ctx.restore(); }
+
+var SP = {};
+// 細長い小魚（群れ）
+SP.tetra = {
+  len: [66, 74], amp: 0.1, k: 2.6, beat: 1.8, speed: 36, turn: 2.2,
+  body: function () { M(0.5, 0.01); B(0.46, -0.085, 0.26, -0.135, 0.05, -0.13); B(-0.13, -0.125, -0.26, -0.075, -0.32, -0.035); L(-0.32, 0.035); B(-0.24, 0.07, -0.1, 0.115, 0.06, 0.115); B(0.26, 0.115, 0.46, 0.08, 0.5, 0.01); },
+  draw: function (f, F) {
+    fillP(F('coralL'), function () { M(-0.3, -0.02); B(-0.38, -0.05, -0.46, -0.14, -0.53, -0.18); B(-0.49, -0.08, -0.47, -0.03, -0.45, 0); B(-0.47, 0.03, -0.49, 0.08, -0.53, 0.18); B(-0.46, 0.14, -0.38, 0.05, -0.3, 0.02); });
+    fillP(F('sandL'), function () { M(0.06, -0.125); B(0.0, -0.2, -0.06, -0.24, -0.11, -0.23); B(-0.09, -0.17, -0.1, -0.13, -0.13, -0.1); });
+    fillP(F('sandL'), function () { M(-0.04, 0.1); B(-0.1, 0.17, -0.16, 0.18, -0.21, 0.17); L(-0.23, 0.07); });
+    var self = this;
+    fillP(F('cream'), self.body);
+    clipDraw(self.body, function () {
+      fillP(F('slateL'), function () { M(0.6, -0.4); L(-0.4, -0.4); L(-0.4, -0.04); B(-0.1, -0.06, 0.2, -0.07, 0.6, -0.05); });
+      fillP(F('teal'), function () { M(0.38, -0.045); B(0.15, -0.065, -0.1, -0.05, -0.34, -0.035); L(-0.34, 0.02); B(-0.1, 0.01, 0.15, 0.0, 0.38, 0.01); });
+      fillP(F('coral'), function () { M(0.02, 0.045); B(-0.1, 0.035, -0.25, 0.03, -0.36, 0.025); L(-0.36, 0.3); L(0.02, 0.3); });
+    });
+    fillP(F('ink'), function () { E(0.37, -0.02, 0.032); });
+    fillP(F('cream'), function () { E(0.38, -0.03, 0.011); });
+  }
+};
+// 平たく、ひれが長い（エンゼル型）
+SP.angel = {
+  len: [118, 132], amp: 0.06, k: 2.0, beat: 0.75, speed: 19, turn: 3.4,
+  pTurn: 0.6, midTurn: 1 / 90, band: [0.22, 0.58], away: [10, 30],
+  body: function () { M(0.5, 0.0); B(0.46, -0.14, 0.3, -0.32, 0.08, -0.32); B(-0.12, -0.32, -0.24, -0.16, -0.29, -0.05); L(-0.29, 0.05); B(-0.24, 0.16, -0.12, 0.32, 0.08, 0.32); B(0.3, 0.32, 0.46, 0.14, 0.5, 0.0); },
+  fins: function () {
+    M(0.2, -0.28); B(0.08, -0.5, -0.12, -0.8, -0.32, -0.98); B(-0.26, -0.66, -0.22, -0.4, -0.17, -0.2);
+    M(0.14, 0.28); B(0.04, 0.5, -0.12, 0.8, -0.32, 0.98); B(-0.26, 0.66, -0.22, 0.4, -0.17, 0.2);
+  },
+  stripes: function (F, c) {
+    [0.31, 0.07, -0.18].forEach(function (sx, i) {
+      var w = i === 1 ? 0.085 : 0.065;
+      fillP(c, function () { M(sx - w / 2 + 0.03, -1.2); L(sx + w / 2 + 0.03, -1.2); L(sx + w / 2 - 0.03, 1.2); L(sx - w / 2 - 0.03, 1.2); });
+    });
+  },
+  draw: function (f, F) {
+    var v = f.variant, finC = v ? 'sandM' : 'creamD', bodyC = v ? 'sandL' : 'cream', stC = v ? 'rust' : 'ink';
+    var self = this;
+    fillP(F(finC), function () { M(-0.27, -0.05); B(-0.36, -0.16, -0.46, -0.25, -0.53, -0.25); B(-0.48, -0.08, -0.48, 0.08, -0.53, 0.25); B(-0.46, 0.25, -0.36, 0.16, -0.27, 0.05); });
+    fillP(F(finC), self.fins);
+    clipDraw(self.fins, function () { self.stripes(F, F(stC)); });
+    fillP(F(finC), function () { M(0.22, 0.24); B(0.2, 0.45, 0.12, 0.62, 0.02, 0.82); B(0.15, 0.62, 0.24, 0.45, 0.27, 0.24); });
+    fillP(F(bodyC), self.body);
+    clipDraw(self.body, function () {
+      fillP(F(v ? 'mustL' : 'sandL'), function () { M(0.6, -0.45); L(-0.4, -0.45); L(-0.4, -0.2); B(-0.1, -0.3, 0.2, -0.3, 0.6, -0.2); });
+      self.stripes(F, F(stC));
+    });
+    fillP(F('mustard'), function () { E(0.37, -0.07, 0.05); });
+    fillP(F('ink'), function () { E(0.38, -0.07, 0.028); });
+  }
+};
+// 丸い
+SP.round = {
+  len: [74, 84], amp: 0.07, k: 2.0, beat: 1.3, speed: 22, turn: 2.6,
+  pTurn: 0.55, midTurn: 1 / 70, band: [0.34, 0.78], away: [8, 25],
+  body: function () { M(0.47, 0.03); B(0.47, -0.2, 0.3, -0.36, 0.08, -0.36); B(-0.14, -0.36, -0.3, -0.2, -0.31, -0.02); L(-0.31, 0.03); B(-0.3, 0.2, -0.14, 0.36, 0.08, 0.36); B(0.3, 0.36, 0.47, 0.24, 0.47, 0.03); },
+  draw: function (f, F) {
+    var self = this;
+    fillP(F('mustL'), function () { M(-0.28, -0.04); B(-0.38, -0.16, -0.46, -0.21, -0.51, -0.18); B(-0.47, -0.06, -0.47, 0.06, -0.51, 0.18); B(-0.46, 0.21, -0.38, 0.16, -0.28, 0.04); });
+    fillP(F('mustL'), function () { M(0.04, -0.34); B(-0.03, -0.47, -0.15, -0.48, -0.21, -0.42); B(-0.19, -0.34, -0.17, -0.3, -0.15, -0.27); });
+    fillP(F('mustL'), function () { M(0.0, 0.34); B(-0.06, 0.45, -0.16, 0.46, -0.21, 0.4); B(-0.19, 0.33, -0.17, 0.29, -0.15, 0.26); });
+    fillP(F('mustard'), self.body);
+    clipDraw(self.body, function () {
+      fillP(F('cream'), function () { M(0.6, 0.07); B(0.3, 0.15, 0.0, 0.15, -0.4, 0.09); L(-0.4, 0.6); L(0.6, 0.6); });
+      fillP(F('rust'), function () { E(0.14, -0.22, 0.04); E(0.0, -0.27, 0.035); E(-0.13, -0.17, 0.032); E(0.02, -0.12, 0.03); E(0.24, -0.26, 0.028); E(-0.2, -0.04, 0.026); E(-0.08, -0.03, 0.022); });
+    });
+    var fl = 0.05 * Math.sin(f.ph + 1.0);
+    fillP(F('mustL'), function () { M(0.17, 0.06); B(0.08, 0.0 + fl, 0.0, 0.08 + fl, 0.02, 0.18 + fl); B(0.08, 0.16, 0.13, 0.11, 0.17, 0.06); });
+    fillP(F('cream'), function () { E(0.29, -0.1, 0.078); });
+    fillP(F('ink'), function () { E(0.31, -0.1, 0.046); });
+  }
+};
+// 主役（大きく、尾の長い金魚・錦鯉風）
+SP.main = {
+  len: [250, 250], amp: 0.13, k: 3.4, beat: 0.5, speed: 24, turn: 4.4,
+  pTurn: 0.5, midTurn: 1 / 160, band: [0.22, 0.55], away: [20, 45],
+  body: function () { M(0.5, 0.02); B(0.49, -0.11, 0.37, -0.2, 0.2, -0.205); B(0.04, -0.21, -0.06, -0.12, -0.09, -0.05); L(-0.09, 0.05); B(-0.06, 0.13, 0.04, 0.2, 0.2, 0.2); B(0.37, 0.2, 0.49, 0.13, 0.5, 0.02); },
+  draw: function (f, F) {
+    var self = this;
+    fillP(F('coralL'), function () { M(-0.04, -0.05); B(-0.18, -0.2, -0.36, -0.31, -0.57, -0.3); B(-0.48, -0.2, -0.44, -0.08, -0.42, 0); B(-0.44, 0.08, -0.48, 0.2, -0.57, 0.3); B(-0.36, 0.31, -0.18, 0.2, -0.04, 0.05); });
+    fillP(F('coral'), function () {
+      M(-0.06, -0.03); B(-0.2, -0.12, -0.34, -0.2, -0.5, -0.24); B(-0.36, -0.15, -0.22, -0.07, -0.06, -0.005);
+      M(-0.06, 0.03); B(-0.2, 0.12, -0.34, 0.2, -0.5, 0.24); B(-0.36, 0.15, -0.22, 0.07, -0.06, 0.005);
+    });
+    fillP(F('coralL'), function () { M(0.26, -0.19); B(0.18, -0.35, 0.02, -0.39, -0.12, -0.33); B(-0.04, -0.24, 0.02, -0.17, 0.06, -0.15); });
+    fillP(F('coralL'), function () { M(0.04, 0.17); B(0.0, 0.27, -0.08, 0.29, -0.13, 0.26); B(-0.08, 0.19, -0.04, 0.15, -0.02, 0.13); });
+    fillP(F('coral'), self.body);
+    clipDraw(self.body, function () {
+      fillP(F('cream'), function () { M(0.46, -0.22); B(0.42, -0.08, 0.32, -0.03, 0.22, -0.07); B(0.15, -0.11, 0.12, -0.18, 0.1, -0.3); });
+      fillP(F('cream'), function () { M(0.3, 0.3); B(0.22, 0.12, 0.06, 0.05, -0.12, 0.1); L(-0.12, 0.3); });
+      fillP(F('rust'), function () { M(0.06, -0.26); B(0.03, -0.12, -0.04, -0.07, -0.12, -0.1); L(-0.12, -0.3); });
+    });
+    fillP(F('coralL'), function () { M(0.24, 0.15); B(0.2, 0.27, 0.12, 0.31, 0.05, 0.31); B(0.1, 0.23, 0.16, 0.18, 0.19, 0.15); });
+    fillP(F('cream'), function () { E(0.4, -0.045, 0.034); });
+    fillP(F('ink'), function () { E(0.405, -0.045, 0.022); });
+  }
+};
+// 底にいる魚（コリドラス型）
+SP.cory = {
+  len: [98, 108], amp: 0.08, k: 2.5, beat: 1.6, speed: 15, turn: 2.8,
+  pTurn: 0.65, away: [10, 30],
+  body: function () { M(0.5, 0.07); B(0.48, -0.06, 0.38, -0.17, 0.2, -0.19); B(0.0, -0.2, -0.2, -0.12, -0.32, -0.04); L(-0.32, 0.04); B(-0.16, 0.1, 0.1, 0.13, 0.3, 0.13); B(0.42, 0.13, 0.5, 0.11, 0.5, 0.07); },
+  draw: function (f, F) {
+    var self = this;
+    fillP(F('sandL'), function () { M(-0.3, -0.03); B(-0.38, -0.08, -0.44, -0.15, -0.51, -0.18); B(-0.48, -0.07, -0.46, -0.02, -0.44, 0); B(-0.46, 0.02, -0.48, 0.07, -0.51, 0.17); B(-0.44, 0.13, -0.38, 0.07, -0.3, 0.03); });
+    fillP(F('coryBk'), function () { M(0.17, -0.18); B(0.13, -0.3, 0.08, -0.38, 0.03, -0.41); B(0.0, -0.3, -0.03, -0.22, -0.06, -0.17); });
+    fillP(F('corySk'), function () { M(-0.19, -0.11); Q(-0.24, -0.18, -0.27, -0.08); });
+    fillP(F('corySk'), self.body);
+    clipDraw(self.body, function () {
+      fillP(F('cream'), function () { M(0.6, 0.04); B(0.3, 0.07, 0.0, 0.06, -0.4, 0.025); L(-0.4, 0.3); L(0.6, 0.3); });
+      fillP(F('coryBk'), function () { M(0.42, -0.3); L(0.33, -0.3); L(0.33, 0.2); L(0.42, 0.2); });
+      fillP(F('coryBk'), function () {
+        E(0.24, -0.1, 0.028); E(0.15, -0.13, 0.026); E(0.06, -0.11, 0.027); E(-0.03, -0.12, 0.025); E(-0.12, -0.08, 0.024); E(-0.2, -0.06, 0.02);
+        E(0.19, -0.03, 0.024); E(0.1, -0.04, 0.024); E(0.01, -0.03, 0.023); E(-0.08, -0.02, 0.022); E(-0.17, -0.01, 0.018); E(-0.26, -0.02, 0.016);
+      });
+    });
+    fillP(F('cream'), function () { M(0.3, 0.1); B(0.24, 0.18, 0.16, 0.23, 0.1, 0.21); B(0.15, 0.15, 0.22, 0.12, 0.26, 0.1); });
+    fillP(F('cream'), function () { M(0.48, 0.09); Q(0.54, 0.15, 0.49, 0.2); Q(0.5, 0.14, 0.45, 0.1); });
+    fillP(F('mustL'), function () { E(0.375, -0.06, 0.04); });
+    fillP(F('ink'), function () { E(0.38, -0.06, 0.025); });
+  }
+};
+// 群れの先導役（描かない）
+var SCHOOL = { len: [300, 300], speed: 34, turn: 3.4, pTurn: 0.7, midTurn: 1 / 110, band: [0.24, 0.6], away: [8, 20], beat: 1 };
+
+var fishes = [], members = [], leader = null;
+
+function makeFish(key, z, variant) {
+  var sp = SP[key];
+  return {
+    key: key, sp: sp, z: z, sc: 1 - 0.35 * z, fog: 0.06 + 0.42 * z, variant: variant || 0,
+    len: rr(sp.len[0], sp.len[1]), x: 0, y: 0, dir: 1, face: 1, dir0: 1, turning: false, tt: 0,
+    decided: false, exiting: false, away: false, awayT: 0,
+    ph: rand() * TAU, p1: rand() * TAU, p2: rand() * TAU, p3: rand() * TAU,
+    f1: rr(0.03, 0.06), f2: rr(0.07, 0.12), yb: 0.5, yt: 0.5, ytT: rr(5, 15),
+    pitch: 0, vx: 0, vy: 0, spd: 1, mv: true, mt: rr(3, 8), v: 0
+  };
+}
+function pxLen(f) { return f.len * U * f.sc; }
+function reach(f) { return pxLen(f) * (f.key === 'angel' ? 0.7 : 0.62); }
+function edgeM(f, spd, sp) { return reach(f) + spd * U * f.sc * sp.turn / Math.PI + 24 * U; }
+
+function startTurn(f) { f.turning = true; f.tt = 0; f.dir0 = f.dir; }
+function stepTurn(f, sp, h) {
+  f.tt += h;
+  var pr = Math.min(1, f.tt / sp.turn);
+  f.face = f.dir0 * Math.cos(Math.PI * pr);
+  if (pr >= 1) { f.turning = false; f.dir = -f.dir0; f.face = f.dir; f.decided = false; }
+}
+function goAway(f, sp) { f.away = true; f.awayT = rr(sp.away[0], sp.away[1]); f.exiting = false; f.turning = false; }
+function respawn(f, sp) {
+  var side = rand() < 0.5 ? -1 : 1, r = reach(f) + 30 * U;
+  f.x = side < 0 ? -r : W + r; f.dir = -side; f.face = f.dir;
+  f.away = false; f.decided = false; f.exiting = false; f.turning = false;
+  if (sp.band) { f.yb = f.yt = rr(sp.band[0], sp.band[1]); f.y = swimYAt(f); }
+  f.pitch = 0;
+}
+function edgeLogic(f, sp, spd, h) {
+  if (f.turning) { stepTurn(f, sp, h); return; }
+  var m = edgeM(f, spd, sp);
+  var nearR = f.dir > 0 && f.x > W - m, nearL = f.dir < 0 && f.x < m;
+  if ((nearR || nearL) && !f.decided) {
+    f.decided = true;
+    if (rand() < sp.pTurn && f.x > m * 0.5 && f.x < W - m * 0.5) startTurn(f); else f.exiting = true;
+  } else if (!f.exiting && !f.decided && f.x > m * 1.3 && f.x < W - m * 1.3 && rand() < sp.midTurn * h) {
+    startTurn(f);
+  }
+}
+function offscreen(f, extra) { var r = reach(f) + (extra || 0); return f.x < -r || f.x > W + r; }
+
+function swimY(f, sp, h) {
+  f.ytT -= h;
+  if (f.ytT <= 0) { f.ytT = rr(10, 24); f.yt = rr(sp.band[0], sp.band[1]); }
+  f.yb += (f.yt - f.yb) * (1 - Math.exp(-h * 0.05));
+  f.p1 = wrap(f.p1 + h * f.f1 * TAU); f.p2 = wrap(f.p2 + h * f.f2 * TAU);
+  var ny = swimYAt(f);
+  f.vy = (ny - f.y) / h; f.y = ny;
+}
+function swimYAt(f) { return surfY + D * (f.yb + 0.03 * Math.sin(f.p1) + 0.012 * Math.sin(f.p2)); }
+function setPitch(f, h, lim) {
+  var s = f.face >= 0 ? 1 : -1;
+  var tg = clamp(Math.atan2(f.vy, Math.max(Math.abs(f.vx), 6 * U)), -lim, lim) * s * Math.min(1, Math.abs(f.face) * 2);
+  f.pitch += (tg - f.pitch) * (1 - Math.exp(-h * 1.5));
+}
+
+function moveFish(f, h) {
+  var sp = f.sp;
+  if (f.away) { f.awayT -= h; if (f.awayT <= 0) respawn(f, sp); return; }
+  edgeLogic(f, sp, sp.speed, h);
+  f.p3 = wrap(f.p3 + h * 0.13 * TAU);
+  f.spd = 0.82 + 0.18 * Math.sin(f.p3);
+  f.vx = sp.speed * U * f.sc * f.spd * f.face;
+  f.x += f.vx * h;
+  if (f.exiting && offscreen(f, 10 * U)) { goAway(f, sp); return; }
+  swimY(f, sp, h);
+  setPitch(f, h, 0.28);
+  f.ph = wrap(f.ph + h * TAU * sp.beat * (0.6 + 0.4 * f.spd) * (f.turning ? 1.3 : 1));
+}
+
+function moveLeader(h) {
+  var f = leader, sp = SCHOOL;
+  if (f.away) {
+    f.awayT -= h;
+    if (f.awayT <= 0) {
+      respawn(f, sp);
+      f.x += (f.x < 0 ? -1 : 1) * 260 * U; // 群れの幅ぶん外から戻す
+      for (var i = 0; i < members.length; i++) { var m = members[i]; m.x = f.x + m.bx * U; m.y = f.y + m.by * U; m.face = f.face; m.vx = 0; m.vy = 0; m.pitch = 0; }
+    }
+    return;
+  }
+  edgeLogic(f, sp, sp.speed, h);
+  f.p3 = wrap(f.p3 + h * 0.1 * TAU);
+  f.vx = sp.speed * U * (0.85 + 0.15 * Math.sin(f.p3)) * f.face;
+  f.x += f.vx * h;
+  if (f.exiting) {
+    var all = offscreen(f, 0);
+    for (var j = 0; all && j < members.length; j++) if (!offscreen(members[j], 10 * U)) all = false;
+    if (all) { goAway(f, sp); return; }
+  }
+  swimY(f, sp, h);
+}
+function moveMember(m, h) {
+  if (leader.away) return;
+  m.p1 = wrap(m.p1 + h * m.f1 * TAU); m.p2 = wrap(m.p2 + h * m.f2 * TAU);
+  var tx = leader.x + (m.bx + 55 * Math.sin(m.p1)) * U, ty = leader.y + (m.by + 26 * Math.sin(m.p2)) * U;
+  var k = 1 - Math.exp(-h / m.tau);
+  var nx = m.x + (tx - m.x) * k, ny = m.y + (ty - m.y) * k;
+  m.vx = (nx - m.x) / h; m.vy = (ny - m.y) / h; m.x = nx; m.y = ny;
+  m.face += (leader.face - m.face) * (1 - Math.exp(-h / m.tauF));
+  setPitch(m, h, 0.3);
+  var s = Math.min(1.6, Math.hypot(m.vx, m.vy) / (SCHOOL.speed * U));
+  m.ph = wrap(m.ph + h * TAU * m.sp.beat * (0.6 + 0.5 * s));
+}
+function moveCory(f, h) {
+  var sp = f.sp;
+  if (f.away) { f.awayT -= h; if (f.awayT <= 0) { respawn(f, sp); f.mv = true; f.v = sp.speed * 0.6; f.mt = rr(4, 8); f.y = sandY(f.x) - pxLen(f) * 0.13; } return; }
+  f.mt -= h;
+  if (f.mt <= 0) {
+    f.mv = !f.mv; f.mt = f.mv ? rr(3, 8) : rr(2.5, 7);
+    var m0 = edgeM(f, sp.speed, sp);
+    if (!f.mv && !f.turning && !f.exiting && rand() < 0.3 && f.x > m0 && f.x < W - m0) startTurn(f);
+  }
+  var target = (f.mv || f.exiting) ? sp.speed : 0;
+  f.v += (target - f.v) * (1 - Math.exp(-h * 0.8));
+  edgeLogic(f, { turn: sp.turn, pTurn: sp.pTurn, midTurn: 0 }, sp.speed, h);
+  f.vx = f.v * U * f.sc * f.face;
+  f.x += f.vx * h;
+  if (f.exiting && offscreen(f, 10 * U)) { goAway(f, sp); return; }
+  f.p1 = wrap(f.p1 + h * TAU * 0.35);
+  var Lp = pxLen(f);
+  var ny = sandY(f.x) - Lp * 0.12 - 3 * U * (0.5 + 0.5 * Math.sin(f.p1)) * (f.v / sp.speed);
+  f.vy = (ny - f.y) / h; f.y = ny;
+  var slope = Math.atan2(sandY(f.x + 10 * U) - sandY(f.x - 10 * U), 20 * U);
+  var rest = 1 - f.v / sp.speed;
+  var s = f.face >= 0 ? 1 : -1;
+  var tg = slope * Math.min(1, Math.abs(f.face) * 2) + s * 0.07 * rest * (0.6 + 0.4 * Math.sin(f.p1));
+  f.pitch += (tg - f.pitch) * (1 - Math.exp(-h * 2));
+  f.ph = wrap(f.ph + h * TAU * sp.beat * (0.25 + 0.75 * (f.v / sp.speed)) * (f.turning ? 1.3 : 1));
+}
+
+function initFish() {
+  fishes = []; members = [];
+  leader = makeFish('tetra', 0.3); leader.sp = SCHOOL; leader.len = 300; leader.sc = 1;
+  // 画面全体に散らばるよう、x を区切って割り当てる
+  var slots = [0.12, 0.3, 0.5, 0.7, 0.88];
+  function sx(i) { return (slots[i % slots.length] + rr(-0.05, 0.05)) * W; }
+  leader.x = 0.5 * W; leader.dir = rand() < 0.5 ? 1 : -1; leader.face = leader.dir;
+  leader.yb = leader.yt = 0.42;
+  for (var i = 0; i < 8; i++) {
+    var m = makeFish('tetra', rr(0.22, 0.46));
+    m.bx = (i / 7 - 0.5) * 340 + rr(-25, 25); m.by = rr(-75, 75);
+    m.tau = rr(0.8, 1.6); m.tauF = rr(0.35, 0.9);
+    members.push(m); fishes.push(m);
+  }
+  var big = makeFish('main', 0.04); big.x = sx(1); big.yb = big.yt = 0.3; fishes.push(big);
+  var a1 = makeFish('angel', 0.18, 0); a1.x = sx(3); a1.yb = a1.yt = 0.4; fishes.push(a1);
+  var a2 = makeFish('angel', 0.52, 1); a2.x = sx(0); a2.yb = a2.yt = 0.28; fishes.push(a2);
+  [[0.1, 4, 0.66], [0.36, 2, 0.5], [0.6, 0, 0.72]].forEach(function (d) { var r = makeFish('round', d[0]); r.x = sx(d[1]); r.yb = r.yt = d[2]; fishes.push(r); });
+  [[0.02, 2], [0.12, 0], [0.22, 4]].forEach(function (d) { var c = makeFish('cory', d[0]); c.x = sx(d[1]); c.mv = rand() < 0.5; fishes.push(c); });
+  fishes.forEach(function (f) {
+    if (f.key !== 'tetra') { f.dir = rand() < 0.5 ? 1 : -1; f.face = f.dir; }
+  });
+  placeAll();
+  fishes.sort(function (a, b) { return b.z - a.z; });
+}
+function placeAll() {
+  var all = fishes.concat([leader]);
+  for (var i = 0; i < all.length; i++) {
+    var f = all[i];
+    if (f.key === 'cory') f.y = sandY(f.x) - pxLen(f) * 0.12;
+    else if (f !== leader && f.key === 'tetra') { /* 後で */ }
+    else f.y = swimYAt(f);
+  }
+  for (var j = 0; j < members.length; j++) {
+    var m = members[j]; m.x = leader.x + m.bx * U; m.y = leader.y + m.by * U; m.face = leader.face;
+  }
+}
+
+/* ===== 泡・粒 ===== */
+var BUB_MAX = 48, bubbles = [];
+for (var bi = 0; bi < BUB_MAX; bi++) bubbles.push({ alive: false, x: 0, x0: 0, y: 0, r: 0, vy: 0, ph: 0, wf: 0, wa: 0 });
+var PART_N = 80, parts = [];
+function resetPart(p, fresh) {
+  p.x = rand() * W; p.y = surfY + rand() * (H - surfY);
+  p.r = (0.8 + rand() * 2.2) * U; p.z = rand();
+  p.vx = (rand() - 0.5) * 5; p.vy = (rand() - 0.6) * 3;
+  p.ph = rand() * TAU; p.f = rr(0.05, 0.15);
+  p.life = rr(25, 70); p.age = fresh ? rand() * p.life : 0;
+}
+for (var pi = 0; pi < PART_N; pi++) { var pp = {}; parts.push(pp); }
+
+function spawnBubble(e) {
+  for (var i = 0; i < BUB_MAX; i++) {
+    var b = bubbles[i];
+    if (!b.alive) {
+      b.alive = true; b.x0 = e.x + rr(-4, 4) * U; b.y = sandY(e.x) + 2 * U; b.r = rr(3.5, 7) * U;
+      b.vy = -(42 + rand() * 22) * U; b.ph = rand() * TAU; b.wf = rr(0.5, 1.0); b.wa = rr(2, 6) * U; b.x = b.x0;
+      return;
+    }
+  }
+}
+function stepBubbles(h) {
+  for (var i = 0; i < emitters.length; i++) {
+    var e = emitters[i];
+    e.t -= h;
+    if (e.t <= 0) { e.active = !e.active; e.t = e.active ? rr(6, 14) : rr(10, 35); }
+    if (e.active) { e.sp -= h; if (e.sp <= 0) { e.sp = rr(0.35, 0.9); spawnBubble(e); } }
+  }
+  for (var j = 0; j < BUB_MAX; j++) {
+    var b = bubbles[j];
+    if (!b.alive) continue;
+    b.ph = wrap(b.ph + h * b.wf * TAU);
+    b.y += b.vy * h; b.r += 0.12 * U * h;
+    b.x = b.x0 + Math.sin(b.ph) * b.wa;
+    if (b.y < surfY - b.r * 2) b.alive = false;
+  }
+}
+function stepParts(h) {
+  for (var i = 0; i < PART_N; i++) {
+    var p = parts[i];
+    p.ph = wrap(p.ph + h * p.f * TAU);
+    p.x += (p.vx + Math.sin(p.ph) * 3) * U * h;
+    p.y += (p.vy + Math.cos(p.ph) * 1.5) * U * h;
+    p.age += h;
+    if (p.x < -10 * U) p.x += W + 20 * U; else if (p.x > W + 10 * U) p.x -= W + 20 * U;
+    if (p.age > p.life || p.y < surfY - 10 * U || p.y > H + 10 * U) resetPart(p, false);
+  }
+}
+
+/* ===== 時間を進める ===== */
+var plPh = [0, 0, 0, 0], sph = 0, sph2 = 0;
+function step(h) {
+  dayPh += h / CYCLE; if (dayPh >= 1) dayPh -= 1;
+  for (var l = 0; l < 4; l++) {
+    for (var i = 0; i < plants[l].length; i++) { var p = plants[l][i]; p.ph = wrap(p.ph + h * p.f * TAU); }
+  }
+  for (var r = 0; r < rays.length; r++) { rays[r].ph = wrap(rays[r].ph + h * rays[r].f * TAU); rays[r].ph2 = wrap(rays[r].ph2 + h * rays[r].f2 * TAU); }
+  sph = wrap(sph + h * 0.05 * TAU); sph2 = wrap(sph2 + h * 0.08 * TAU);
+  moveLeader(h);
+  for (var j = 0; j < fishes.length; j++) {
+    var f = fishes[j];
+    if (f.key === 'tetra') moveMember(f, h);
+    else if (f.key === 'cory') moveCory(f, h);
+    else moveFish(f, h);
+  }
+  stepBubbles(h);
+  stepParts(h);
+}
+
+/* ===== 描画 ===== */
+var CX = new Float64Array(24), CY = new Float64Array(24), SCR = new Float64Array(200);
+
+function drawBlade(x0, y0, h, w, lean, ph, amp, col) {
+  var N = 9, i, s;
+  for (i = 0; i <= N; i++) {
+    s = i / N;
+    CX[i] = x0 + amp * Math.pow(s, 1.5) * Math.sin(ph - s * 1.3) + lean * s * s * h;
+    CY[i] = y0 - s * h;
+  }
+  var k = 0;
+  for (i = 0; i < N; i++) {
+    s = i / N;
+    var a = i > 0 ? i - 1 : 0, tx = CX[i + 1] - CX[a], ty = CY[i + 1] - CY[a], l = Math.hypot(tx, ty) || 1;
+    var hw = w * 0.5 * (1 - 0.3 * s) * Math.min(1, (1 - s) / 0.3);
+    SCR[k++] = CX[i] - ty / l * hw; SCR[k++] = CY[i] + tx / l * hw;
+  }
+  SCR[k++] = CX[N]; SCR[k++] = CY[N];
+  for (i = N - 1; i >= 0; i--) {
+    s = i / N;
+    var a2 = i > 0 ? i - 1 : 0, tx2 = CX[i + 1] - CX[a2], ty2 = CY[i + 1] - CY[a2], l2 = Math.hypot(tx2, ty2) || 1;
+    var hw2 = w * 0.5 * (1 - 0.3 * s) * Math.min(1, (1 - s) / 0.3);
+    SCR[k++] = CX[i] + ty2 / l2 * hw2; SCR[k++] = CY[i] - tx2 / l2 * hw2;
+  }
+  ctx.fillStyle = col; ctx.beginPath(); smoothArr(SCR, k); ctx.closePath(); ctx.fill();
+}
+function drawPlant(p, fog, shade) {
+  var amp = p.amp * U, i, it;
+  if (p.t === 'b') {
+    for (i = 0; i < p.items.length; i++) {
+      it = p.items[i];
+      var bx = p.x + it.dx, byy = (p.layer === 3 ? H + 10 * U : (p.layer === 1 ? backY(bx) : sandY(bx))) + 8 * U;
+      drawBlade(bx, byy, it.h, it.w, it.lean, p.ph + it.po, amp * (0.7 + 0.5 * it.h / D), C(it.c, fog, shade));
+    }
+  } else if (p.t === 's') {
+    for (i = 0; i < p.items.length; i++) {
+      it = p.items[i];
+      var x0 = p.x + it.dx, y0 = (p.layer === 1 ? backY(x0) : sandY(x0)) + 6 * U, h = it.h, ph = p.ph + it.po;
+      drawBlade(x0, y0, h, 5 * U, it.lean, ph, amp, C(p.sc, fog, shade));
+      // 葉は色ごとにまとめて 1 回で塗る（どの葉も同じ向きに回るパスなので重なりは穴にならない）
+      for (var pass = 0; pass < 2; pass++) {
+        ctx.fillStyle = C(p.lc[pass], fog, shade);
+        ctx.beginPath();
+        for (var j = 1; j <= it.nodes; j++) {
+          var s = j / (it.nodes + 0.4);
+          var cx = x0 + amp * Math.pow(s, 1.5) * Math.sin(ph - s * 1.3) + it.lean * s * s * h, cy = y0 - s * h;
+          var tilt = 0.18 * Math.sin(ph - s * 1.3 + 0.6);
+          var ll = it.ll * (1 - 0.45 * s);
+          for (var side = -1; side <= 1; side += 2) {
+            if ((j + (side > 0 ? 1 : 0)) % 2 !== pass) continue;
+            var ang = -Math.PI / 2 + side * (1.05 - 0.45 * s) + tilt;
+            var ex = cx + Math.cos(ang) * ll, ey = cy + Math.sin(ang) * ll;
+            leafPath(cx, cy, cx + Math.cos(ang) * ll * 0.5, cy + Math.sin(ang) * ll * 0.5, ex, ey, ll * 0.42);
+          }
+        }
+        ctx.fill();
+      }
+    }
+  } else {
+    var bx0 = p.x, by0 = p.layer === 3 ? p.y : sandY(p.x) + 6 * U;
+    for (i = 0; i < p.items.length; i++) {
+      it = p.items[i];
+      var sw = Math.sin(p.ph + it.po) * amp * 0.6;
+      var a = it.a, l = it.l;
+      var cx2 = bx0 + Math.sin(a) * l * 0.55 + sw * 0.3, cy2 = by0 - Math.cos(a) * l * 0.55;
+      var a2 = a * 1.4;
+      var tx = bx0 + Math.sin(a2) * l + sw, ty = by0 - Math.cos(a2) * l * (Math.abs(a2) > 1.4 ? 0.5 : 1);
+      ctx.fillStyle = C(it.c, fog, shade);
+      ctx.beginPath(); leafPath(bx0, by0, cx2, cy2, tx, ty, it.w); ctx.fill();
+      ctx.fillStyle = C(p.vein, fog, shade);
+      ctx.beginPath(); leafPath(bx0, by0, cx2, cy2, bx0 + (tx - bx0) * 0.88, by0 + (ty - by0) * 0.88, it.w * 0.09); ctx.fill();
+    }
+  }
+}
+function drawRock(r, fog, shade, shadowA) {
+  var baseY = (r.layer === 0 ? backY(r.x) : r.layer === 3 ? H + 6 * U : sandY(r.x)) + r.ry * 0.1;
+  ctx.save();
+  ctx.translate(r.x, baseY);
+  if (shadowA) {
+    ctx.save(); ctx.translate(7 * U, 4 * U); ctx.globalAlpha = shadowA; ctx.fillStyle = css(env.shade); ctx.fill(r.path); ctx.restore();
+  }
+  ctx.fillStyle = r.layer === 0 ? env.farC : C(r.c, fog, shade); ctx.fill(r.path);
+  ctx.save(); ctx.clip(r.path);
+  ctx.fillStyle = r.layer === 0 ? env.farH : C(r.ch, fog, shade); ctx.fill(r.hi);
+  if (r.moss) { ctx.fillStyle = C('olive', fog, shade); ctx.fill(r.moss); }
+  ctx.restore();
+  ctx.restore();
+}
+function drawWater() {
+  var n = 9;
+  for (var i = 0; i < n; i++) {
+    ctx.fillStyle = css(mx(env.top, env.bot, i / (n - 1)));
+    var y0 = Math.floor(i / n * floorY), y1 = Math.ceil((i + 1) / n * floorY) + 1;
+    ctx.fillRect(0, y0, W, (i === n - 1 ? H : y1) - y0);
+  }
+}
+function drawRays() {
+  var slant = floorY * 0.22, col = css(env.ray);
+  ctx.fillStyle = col;
+  for (var i = 0; i < rays.length; i++) {
+    var r = rays[i];
+    var x0 = r.u * W + Math.sin(r.ph) * 40 * U, w = r.w;
+    var a = env.ra * (0.55 + 0.45 * Math.sin(r.ph2));
+    ctx.globalAlpha = a * 0.55;
+    ctx.beginPath(); ctx.moveTo(x0 - w * 0.9, 0); ctx.lineTo(x0 + w * 0.9, 0); ctx.lineTo(x0 + slant + w * 2.0, floorY); ctx.lineTo(x0 + slant - w * 1.4, floorY); ctx.closePath(); ctx.fill();
+    ctx.globalAlpha = a;
+    ctx.beginPath(); ctx.moveTo(x0 - w * 0.4, 0); ctx.lineTo(x0 + w * 0.4, 0); ctx.lineTo(x0 + slant + w * 1.0, floorY); ctx.lineTo(x0 + slant - w * 0.6, floorY); ctx.closePath(); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+function fillCurve(fn, yBottom, col) {
+  ctx.fillStyle = col; ctx.beginPath();
+  var stp = 24 * U;
+  ctx.moveTo(-2, yBottom);
+  for (var x = -2; x < W + stp; x += stp) ctx.lineTo(Math.min(x, W + 2), fn(Math.min(x, W + 2)));
+  ctx.lineTo(W + 2, yBottom); ctx.closePath(); ctx.fill();
+}
+function drawSand() {
+  fillCurve(backY, H + 2, C('sand', 0.36));
+  // 中景の岩・流木の影が落ちる前の砂
+  fillCurve(sandY, H + 2, C('sand', 0.06));
+  var i;
+  for (i = 0; i < ripples.length; i++) {
+    var q = ripples[i];
+    ctx.fillStyle = C('sandM', 0.06); ctx.beginPath();
+    ctx.moveTo(q.x - q.w / 2, q.y); ctx.quadraticCurveTo(q.x, q.y - q.h * 2, q.x + q.w / 2, q.y); ctx.quadraticCurveTo(q.x, q.y + q.h * 0.4, q.x - q.w / 2, q.y); ctx.fill();
+  }
+  for (i = 0; i < pebbles.length; i++) {
+    var p = pebbles[i];
+    ctx.fillStyle = C(p.c, 0.06); ctx.beginPath(); ctx.ellipse(p.x, p.y, p.rx, p.ry, p.a, 0, TAU); ctx.fill();
+  }
+}
+function drawWood(fog) {
+  ctx.save(); ctx.translate(8 * U, 5 * U); ctx.globalAlpha = 0.16; ctx.fillStyle = css(env.shade); ctx.fill(woodShadow); ctx.restore();
+  ctx.fillStyle = C('wood', fog); ctx.fill(woodPath);
+  ctx.save(); ctx.clip(woodPath); ctx.fillStyle = C('woodL', fog); ctx.fill(woodHi); ctx.restore();
+}
+function drawFish(f) {
+  if (f.away) return;
+  var Lp = pxLen(f);
+  if (f.x < -Lp || f.x > W + Lp) return;
+  var sp = f.sp, fog = f.fog;
+  var face = Math.abs(f.face) < 0.03 ? (f.face < 0 ? -0.03 : 0.03) : f.face;
+  bA = sp.amp * (f.turning ? 1.5 : 1) * (f.key === 'cory' ? (0.4 + 0.6 * f.v / sp.speed) : 1);
+  bP = f.ph; bK = sp.k;
+  // 紙の影
+  ctx.save();
+  ctx.translate(f.x + 6 * U * f.sc, f.y + 8 * U * f.sc); ctx.rotate(f.pitch); ctx.scale(face * Lp, Lp);
+  ctx.globalAlpha = 0.13; ctx.fillStyle = css(env.shade); ctx.beginPath(); sp.body(); ctx.fill();
+  ctx.restore();
+  ctx.save();
+  ctx.translate(f.x, f.y); ctx.rotate(f.pitch); ctx.scale(face * Lp, Lp);
+  sp.draw(f, function (n) { return C(n, fog); });
+  ctx.restore();
+}
+function drawBubbles() {
+  var c1 = css(mx(env.ray, env.top, 0.3)), c2 = css(env.ray);
+  for (var i = 0; i < BUB_MAX; i++) {
+    var b = bubbles[i]; if (!b.alive) continue;
+    ctx.globalAlpha = 0.5; ctx.fillStyle = c1; ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, TAU); ctx.fill();
+    ctx.globalAlpha = 0.85; ctx.fillStyle = c2; ctx.beginPath(); ctx.arc(b.x - b.r * 0.35, b.y - b.r * 0.35, b.r * 0.32, 0, TAU); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+function drawParts(near) {
+  ctx.fillStyle = css(mx(env.ray, env.top, 0.2));
+  for (var i = 0; i < PART_N; i++) {
+    var p = parts[i];
+    if ((p.z > 0.6) !== near) continue;
+    var fade = Math.min(1, p.age / 4, (p.life - p.age) / 4);
+    if (fade <= 0) continue;
+    ctx.globalAlpha = (near ? 0.55 : 0.3) * fade;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r * (near ? 1.3 : 0.8), 0, TAU); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+function drawSurface() {
+  var stp = 30 * U, x;
+  function wy(x) { var u = x / W; return surfY + Math.sin(u * TAU * 3 + sph) * 5 * U + Math.sin(u * TAU * 7 - sph2) * 2.5 * U; }
+  ctx.fillStyle = css(mx(env.ray, env.top, 0.55));
+  ctx.globalAlpha = 0.5;
+  ctx.beginPath(); ctx.moveTo(-2, -2);
+  for (x = -2; x < W + stp; x += stp) ctx.lineTo(Math.min(x, W + 2), wy(Math.min(x, W + 2)) + 4 * U);
+  ctx.lineTo(W + 2, -2); ctx.closePath(); ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = css(mx(env.ray, env.top, 0.4));
+  ctx.beginPath(); ctx.moveTo(-2, -2);
+  for (x = -2; x < W + stp; x += stp) ctx.lineTo(Math.min(x, W + 2), wy(Math.min(x, W + 2)));
+  ctx.lineTo(W + 2, -2); ctx.closePath(); ctx.fill();
+}
+
+// 紙の粒子（起動時に一度だけ作るタイル）
+var grain = (function () {
+  var g = document.createElement('canvas'); g.width = g.height = 160;
+  var gx = g.getContext('2d'), id = gx.createImageData(160, 160), d = id.data;
+  for (var i = 0; i < d.length; i += 4) {
+    var v = rand();
+    if (v < 0.5) { d[i] = d[i + 1] = d[i + 2] = 20; d[i + 3] = rand() * 34; }
+    else { d[i] = d[i + 1] = d[i + 2] = 250; d[i + 3] = rand() * 26; }
+  }
+  gx.putImageData(id, 0, 0);
+  return ctx.createPattern(g, 'repeat');
+})();
+
+function draw() {
+  cache.clear();
+  computeEnv();
+  var i;
+  drawWater();
+  for (i = 0; i < farRocks.length; i++) drawRock(farRocks[i], LAYERS[0].fog, 0, 0);
+  for (i = 0; i < plants[1].length; i++) drawPlant(plants[1][i], LAYERS[1].fog, 0);
+  drawRays();
+  drawParts(false);
+  drawSand();
+  var fog2 = LAYERS[2].fog;
+  for (i = 0; i < plants[2].length; i++) drawPlant(plants[2][i], fog2, 0);
+  drawWood(fog2);
+  for (i = 0; i < midRocks.length; i++) drawRock(midRocks[i], fog2, 0, 0.16);
+  drawBubbles();
+  for (i = 0; i < fishes.length; i++) drawFish(fishes[i]);
+  drawParts(true);
+  fillCurve(lipY, H + 2, C('sandM', 0, 0.22));
+  for (i = 0; i < plants[3].length; i++) drawPlant(plants[3][i], 0, LAYERS[3].shade);
+  for (i = 0; i < frontRocks.length; i++) drawRock(frontRocks[i], 0, LAYERS[3].shade, 0);
+  drawSurface();
+  ctx.fillStyle = grain; ctx.globalAlpha = 0.55; ctx.fillRect(0, 0, W, H); ctx.globalAlpha = 1;
+}
+
+/* ===== 大きさ ===== */
+var started = false;
+function resize() {
+  var cw = Math.max(1, window.innerWidth), ch = Math.max(1, window.innerHeight);
+  var dpr = Math.min(window.devicePixelRatio || 1, 2);
+  var w = cw * dpr, h = ch * dpr, s = Math.min(1, MAXLONG / Math.max(w, h));
+  w = Math.max(1, Math.round(w * s)); h = Math.max(1, Math.round(h * s));
+  var oW = W;
+  if (started && w === W && h === H) return;
+  cv.width = w; cv.height = h; W = w; H = h;
+  U = Math.min(W, H) / 1080;
+  surfY = clamp(H * 0.035, 22 * U, 60 * U);
+  floorY = H - clamp(H * 0.17, 130 * U, 250 * U);
+  D = floorY - surfY;
+  build();
+  if (!started) {
+    initFish();
+    for (var i = 0; i < PART_N; i++) resetPart(parts[i], true);
+    started = true;
+  } else {
+    var k = W / oW, all = fishes.concat([leader]);
+    for (var j = 0; j < all.length; j++) all[j].x *= k;
+    placeAll();
+    for (var q = 0; q < PART_N; q++) resetPart(parts[q], true);
+    for (var b = 0; b < BUB_MAX; b++) bubbles[b].alive = false;
+  }
+}
+window.addEventListener('resize', resize);
+resize();
+
+/* ===== ループ ===== */
+var last = -1;
+function frame(now) {
+  var dt = last < 0 ? 0 : (now - last) / 1000;
+  last = now;
+  if (!(dt > 0)) dt = 0;
+  if (dt > 0.1) dt = 0.1;
+  var sim = dt * SPEED;
+  if (sim > 0) {
+    var n = Math.min(MAXSTEPS, Math.max(1, Math.ceil(sim / STEP)));
+    var h = sim / n;
+    for (var i = 0; i < n; i++) step(h);
+  }
+  draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+window.__stats = function () {
+  var bub = 0, vis = 0, away = 0;
+  for (var i = 0; i < BUB_MAX; i++) if (bubbles[i].alive) bub++;
+  for (var j = 0; j < fishes.length; j++) {
+    var f = fishes[j], gone = f.key === 'tetra' ? leader.away : f.away;
+    if (gone) away++; else if (f.x > -pxLen(f) * 0.6 && f.x < W + pxLen(f) * 0.6) vis++;
+  }
+  return { fish: fishes.length, fishOnScreen: vis, fishAway: away, bubbles: bub, bubbleMax: BUB_MAX, particles: parts.length, cycle: +dayPh.toFixed(4), size: [W, H] };
+};
+})();
+</script>
+</body>
+</html>
